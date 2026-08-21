@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+venv/
+env/
+.env
+
+# IDE / Editor
+.obsidian/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific - screenshots & images
+screenshots/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+"Pasted image*.png"
+
+# Personal notes / docs
+notes.md
+"test prompts.md"
+context.md
+explanation.md
+
+# Temporary / debug scripts
+fix_*.py
+new_*.py
+*_final.py
+borwser_unit.py
+prompt_browser.py
+browser_llm.py
+
+# Environment / secrets
+.env
+*.key
+*.pem
+
+# Agent/tooling (personal)
+.agents/
+skills-lock.json
+
+# Logs
+*.log
+
+# Coverage
+.coverage
+htmlcov/
