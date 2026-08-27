@@ -253,11 +253,10 @@ def _run_session_inner(p, browser, page, goal, provider, config,
             context = extract_page_context(page)
             log(f"-- PERCEPTION: title={context['title']!r} url={context['url']}")
 
-            # ----- Planner (every N steps, or after Worker 'done') -----
+            # ----- Planner (every N steps) -----
             run_planner_now = (
                 step == 1
                 or step % 3 == 0
-                or last_action.get("action") == "done"
             )
             next_steps: list[str] = []
             if run_planner_now:
@@ -281,15 +280,12 @@ def _run_session_inner(p, browser, page, goal, provider, config,
             action = decision.get("action", "navigate")
             log(f"[WORKER] {action} -- {decision.get('reasoning', '')}")
 
-            # Worker can also declare done (with an answer)
+            # Authority model: only Planner can finalize.
             if action == "done":
-                final_answer = decision.get(
-                    "answer",
-                    decision.get("reasoning", "Goal achieved.")
-                )
-                status = "done"
-                log(f"\n*** AGENT FINAL ANSWER: {final_answer} ***")
-                break
+                log("[WORKER] invalid action 'done' ignored (Planner-only finalization).")
+                last_action = {"action": "done"}
+                last_result = {"success": False, "note": "rejected by authority model"}
+                continue
 
             # ----- Throttle failed selectors -----
             if action == "click":

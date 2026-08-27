@@ -140,27 +140,26 @@ class TestActionLayer:
 
 class TestCognitiveLayer:
     def test_orchestrator_prompt(self):
-        from cognitive_layer import ORCHESTRATOR_PROMPT
+        from cognitive_layer import ORCHESTRATOR_PROMPT, PROMPT_VERSION
         assert "ORCHESTRATOR" in ORCHESTRATOR_PROMPT
-        assert "search" in ORCHESTRATOR_PROMPT
         assert "browser" in ORCHESTRATOR_PROMPT
+        assert PROMPT_VERSION in ORCHESTRATOR_PROMPT
     
     def test_planner_prompt(self):
-        from cognitive_layer import PLANNER_PROMPT
+        from cognitive_layer import PLANNER_PROMPT, PROMPT_VERSION
         assert "PLANNER" in PLANNER_PROMPT
         assert "verdict" in PLANNER_PROMPT
         assert "done" in PLANNER_PROMPT
         assert "continue" in PLANNER_PROMPT
+        assert PROMPT_VERSION in PLANNER_PROMPT
     
     def test_worker_prompts(self):
-        from cognitive_layer import WORKER_PROMPT_FIRST, WORKER_PROMPT_NEXT
-        import inspect
-        from cognitive_layer import run_worker_first_step
+        from cognitive_layer import WORKER_PROMPT_FIRST, WORKER_PROMPT_NEXT, PROMPT_VERSION
         assert "navigate" in WORKER_PROMPT_FIRST
         assert "click" in WORKER_PROMPT_NEXT
-        # search_google is in the run_worker_first_step function's prompt
-        source = inspect.getsource(run_worker_first_step)
-        assert "search_google" in source
+        assert "search_google" in WORKER_PROMPT_FIRST
+        assert "parameters" in WORKER_PROMPT_NEXT
+        assert PROMPT_VERSION in WORKER_PROMPT_NEXT
 
 
 class TestAgentEngine:
