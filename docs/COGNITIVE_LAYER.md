@@ -230,9 +230,102 @@ Provider-specific limits:
 
 ---
 
-## Error Handling
+## Vision Grounding (SeeAct Style) — RunAgent §4.3
 
-- **Parse Errors**: Returns `{"_parse_error": True, "_raw": str(e)}`
-- **Network Errors**: Retried with exponential backoff (NVIDIA)
-- **JSON Parse Errors**: Extracted via regex from response text
-- **Provider Errors**: Caught and re-raised for engine-level fallback
+The cognitive layer includes vision grounding for visual decision-making using Set-of-Marks (SoM) prompting.
+
+### `run_vision_grounding(vision_provider, goal, ledger, page_context, elements, rate_limiter) -> dict`
+
+Runs vision grounding using SeeAct-style prompting with annotated screenshot.
+
+**Parameters:**
+- `vision_provider`: NvidiaVisionProvider instance
+- `goal`: User goal string
+- `ledger`: Ledger instance for memory context
+- `page_context`: Dict with `annotated_screenshot_bytes`, `vision_elements`, viewport dims
+- `elements`: List of interactive elements with bounding boxes
+- `rate_limiter`: Vision rate limiter
+
+**Returns:**
+```python
+{
+    "element_id": 5,      # Selected element ID from SoM list
+    "action": "click",    # "click" | "type" | "scroll" | "done"
+    "text": "search",     # Text to type (if action="type")
+    "reasoning": "..."    # Explanation
+}
+```
+
+### Vision Grounding Prompt
+
+```
+You are the VISION GROUNDING module of an autonomous web agent (SeeAct / RunAgent style).
+
+User Goal: "{goal}"
+
+{ledger_text}
+
+CURRENT PAGE - Set-of-Marks Annotated:
+The screenshot has numbered bounding boxes on interactive elements.
+
+INTERACTIVE ELEMENTS:
+{elements_text}
+
+TASK: Analyze the screenshot and the element list. Choose the SINGLE best element ID to interact with to make progress towards the goal.
+
+RESPOND WITH JSON ONLY:
+{
+  "element_id": <number>,
+  "action": "click" | "type" | "scroll" | "done",
+  "text": "text to type (if type)",
+  "reasoning": "brief explanation of why this element"
+}
+
+RULES:
+- Pick element_id from the list above ONLY (must be a valid ID shown)
+- If goal is achieved (answer visible on page), use element_id: -1, action: "done", text: "exact answer from page"
+- If no suitable element, use element_id: -1, action: "scroll"
+- For typing: action="type" with text field
+- Prefer click on buttons/links, type on inputs
+- If multiple similar elements, pick the one most relevant to goal
+```
+
+### `parse_vision_response(response) -> dict`
+
+Validates and parses vision model response with fallback to scroll.
+
+```python
+# Handles parse errors gracefully
+if response.get("_parse_error"):
+    return {"element_id": -1, "action": "scroll", "text": "", "reasoning": "Vision parse error"}
+```
+
+### Integration Flow
+
+```
+Perception (action_layer.build_vision_context)
+    │
+    ▼
+Cognitive Layer (run_vision_grounding)
+    │  - Saves screenshot to temp file
+    │  - Calls VLM with annotated screenshot + element list
+    │  - Parses response
+    ▼
+Action Layer (execute_action with vision_click/vision_type)
+    │  - Converts element_id to coordinates
+    │  - Executes click/type at bbox center
+    ▼
+Ledger Update (records vision-grounded action)
+```
+
+### Usage in Agent Engine
+
+```python
+# In _run_session_inner (agent_engine.py)
+if config.use_vision and vision_provider and context.get("vision_elements"):
+    vision_decision = run_vision_grounding(
+        vision_provider, goal, ledger, context, 
+        context["vision_elements"], vision_rate_limiter
+    )
+    # Convert to executable action...
+```

@@ -11,9 +11,15 @@ Implements Algorithm 1 from RunAgent SuperBrowser (§4.1):
         run Worker -> emit 1 action
         execute action, update Ledger
         if captcha: auto-pivot, mark dead_end
+
+Vision integration (SeeAct style, §4.3, §6.1):
+    - Capture screenshot + Set-of-Marks (SoM) annotation
+    - Vision-Language Model grounds action to element ID
+    - Execute coordinate-based click via vision_click
 """
 import os
 import time
+import tempfile
 from dataclasses import dataclass
 from typing import Callable
 
@@ -25,14 +31,17 @@ from action_layer import (
     execute_action,
     extract_page_context,
     is_captcha_page,
+    build_vision_context,
+    extract_elements_with_bbox,
 )
 from cognitive_layer import (
     run_orchestrator,
     run_planner,
     run_worker_first_step,
     run_worker_next_step,
+    run_vision_grounding,
 )
-from llm_providers import LLMProvider, LLMConfig, create_llm_provider, get_rate_limiter
+from llm_providers import LLMProvider, LLMConfig, create_llm_provider, get_rate_limiter, create_vision_provider, get_vision_rate_limiter
 from memory import Ledger, StepOutcome
 
 
@@ -87,6 +96,9 @@ class EngineConfig:
     model: str = "gemini-3.5-flash-lite"
     # Provider type for rate limiting
     provider_type: str = "gemini"
+    # Vision settings
+    use_vision: bool = False
+    vision_model: str = "nvidia/llama-3.1-nemotron-nano-vl-8b-v1"
 
 
 def _classify_search_intent(text: str) -> bool:
@@ -115,10 +127,23 @@ def run_session(
         steps: int,
         browser_obj, playwright_obj (only if keep_browser_open=True)}
     """
+    # Use SEPARATE rate limiters for text and vision since they have different limits
+    # Text: 1 req/min, Vision: 1 req/2min (free tier NVIDIA Build is very aggressive)
     rate_limiter = get_rate_limiter(config.provider_type)
+    vision_rate_limiter = get_rate_limiter("vision")
     ledger = Ledger(goal=goal)
     status = "exhausted"
     final_answer = ""
+
+    # Create vision provider if vision is enabled
+    vision_provider = None
+    if config.use_vision:
+        try:
+            vision_provider = create_vision_provider()
+            log("[ENGINE] Vision provider initialized")
+        except Exception as e:
+            log(f"[ENGINE] Failed to create vision provider: {e}. Disabling vision.")
+            config.use_vision = False
 
     with sync_playwright() as p:
         if config.browser == "cdp":
@@ -155,7 +180,7 @@ def run_session(
         try:
             status, final_answer, step_count, context = _run_session_inner(
                 p, browser, page, goal, provider, config, rate_limiter,
-                ledger, log, is_continuation, start_context,
+                vision_provider, vision_rate_limiter, ledger, log, is_continuation, start_context,
             )
         except Exception as e:
             # Check if we should fallback from NVIDIA to Gemini
@@ -171,7 +196,22 @@ def run_session(
                 # Retry with Gemini
                 status, final_answer, step_count, context = _run_session_inner(
                     p, browser, page, goal, provider, config, rate_limiter,
-                    ledger, log, is_continuation, start_context,
+                    vision_provider, vision_rate_limiter, ledger, log, is_continuation, start_context,
+                )
+            else:
+                raise
+        except ValueError as e:
+            # Handle JSON parse errors from NVIDIA provider
+            if config.provider_type == "nvidia" and "JSON parse failed" in str(e):
+                log(f"[ENGINE] NVIDIA JSON parse error: {e}. Falling back to Gemini...")
+                provider_used = "gemini"
+                provider_fallback = True
+                os.environ["api_provider"] = "gemini"
+                provider = create_llm_provider()
+                rate_limiter = get_rate_limiter("gemini")
+                status, final_answer, step_count, context = _run_session_inner(
+                    p, browser, page, goal, provider, config, rate_limiter,
+                    vision_provider, vision_rate_limiter, ledger, log, is_continuation, start_context,
                 )
             else:
                 raise
@@ -199,7 +239,7 @@ def run_session(
 
 
 def _run_session_inner(p, browser, page, goal, provider, config,
-                       rate_limiter, ledger, log,
+                       rate_limiter, vision_provider, vision_rate_limiter, ledger, log,
                        is_continuation, start_context):
     """The actual cognitive-action-perception loop, isolated for clarity."""
     status = "exhausted"
@@ -246,12 +286,89 @@ def _run_session_inner(p, browser, page, goal, provider, config,
 
         # ----- Main cognitive-action-perception loop -----
         step_count = 0
+        
+        # Vision loop detection
+        recent_vision_actions: list[tuple] = []  # (element_id, action, text)
+        MAX_VISION_REPEATS = 3
+        
         for step in range(1, config.max_steps + 1):
             step_count = step
             log(f"\n========== STEP {step}/{config.max_steps} ==========")
 
+            # ----- Perception: extract page context + vision context -----
             context = extract_page_context(page)
             log(f"-- PERCEPTION: title={context['title']!r} url={context['url']}")
+            
+            # Build vision context if vision is enabled (for Worker's planning)
+            if config.use_vision and vision_provider:
+                log("[VISION] Building vision context (screenshot + SoM)...")
+                try:
+                    vision_context = build_vision_context(page, goal, ledger.render_for_worker())
+                    context["annotated_screenshot_bytes"] = vision_context["annotated_screenshot_bytes"]
+                    context["vision_elements"] = vision_context["elements"]
+                    context["viewport_width"] = vision_context["viewport_width"]
+                    context["viewport_height"] = vision_context["viewport_height"]
+                    log(f"[VISION] Found {len(vision_context['elements'])} interactive elements")
+                    
+                    # DEBUG: Log vision elements with bounding boxes
+                    log("[VISION DEBUG] Elements list:")
+                    for el in vision_context["elements"]:
+                        eid = el.get("id", "?")
+                        bbox = el.get("bbox", [0,0,0,0])
+                        x, y, w, h = bbox
+                        text = el.get("text", "")[:50]
+                        role = el.get("role", "")
+                        selector = el.get("selector", "")[:60]
+                        log(f"  [{eid}] {role} '{text}' @ ({x:.3f},{y:.3f},{w:.3f},{h:.3f}) sel={selector}")
+                    
+                    # DEBUG: Save annotated screenshot for visual inspection
+                    try:
+                        import tempfile
+                        debug_path = f"/tmp/vision_som_step_{step}.png"
+                        with open(debug_path, "wb") as f:
+                            f.write(vision_context["annotated_screenshot_bytes"])
+                        log(f"[VISION DEBUG] SoM screenshot saved to {debug_path}")
+                    except Exception as e:
+                        log(f"[VISION DEBUG] Failed to save screenshot: {e}")
+                except Exception as e:
+                    log(f"[VISION] Failed to build vision context: {e}")
+                    config.use_vision = False
+            
+            # Build vision context if vision is enabled
+            vision_context = {}
+            if config.use_vision and vision_provider:
+                log("[VISION] Building vision context (screenshot + SoM)...")
+                try:
+                    vision_context = build_vision_context(page, goal, ledger.render_for_worker())
+                    context["annotated_screenshot_bytes"] = vision_context["annotated_screenshot_bytes"]
+                    context["vision_elements"] = vision_context["elements"]
+                    context["viewport_width"] = vision_context["viewport_width"]
+                    context["viewport_height"] = vision_context["viewport_height"]
+                    log(f"[VISION] Found {len(vision_context['elements'])} interactive elements")
+                    
+                    # DEBUG: Log vision elements with bounding boxes
+                    log("[VISION DEBUG] Elements list:")
+                    for el in vision_context["elements"]:
+                        eid = el.get("id", "?")
+                        bbox = el.get("bbox", [0,0,0,0])
+                        x, y, w, h = bbox
+                        text = el.get("text", "")[:50]
+                        role = el.get("role", "")
+                        selector = el.get("selector", "")[:60]
+                        log(f"  [{eid}] {role} '{text}' @ ({x:.3f},{y:.3f},{w:.3f},{h:.3f}) sel={selector}")
+                    
+                    # DEBUG: Save annotated screenshot for visual inspection
+                    try:
+                        import tempfile
+                        debug_path = f"/tmp/vision_som_step_{step}.png"
+                        with open(debug_path, "wb") as f:
+                            f.write(vision_context["annotated_screenshot_bytes"])
+                        log(f"[VISION DEBUG] SoM screenshot saved to {debug_path}")
+                    except Exception as e:
+                        log(f"[VISION DEBUG] Failed to save screenshot: {e}")
+                except Exception as e:
+                    log(f"[VISION] Failed to build vision context: {e}")
+                    config.use_vision = False
 
             # ----- Planner (every N steps, or after Worker 'done') -----
             run_planner_now = (
@@ -277,9 +394,119 @@ def _run_session_inner(p, browser, page, goal, provider, config,
                 ledger.set_subgoal(plan.get("reasoning", ""))
 
             # ----- Worker: emit one action -----
-            decision = run_worker_next_step(provider, goal, ledger, context, next_steps, rate_limiter)
-            action = decision.get("action", "navigate")
-            log(f"[WORKER] {action} -- {decision.get('reasoning', '')}")
+            if config.use_vision and vision_provider and context.get("vision_elements"):
+                # Two-step SeeAct: Worker plans → Vision grounds
+                log("[WORKER] Planning with vision context...")
+                
+                # Build interactive elements text for worker
+                elements_for_worker = []
+                for el in context["vision_elements"]:
+                    eid = el.get("id", 0)
+                    text = el.get("text", "")[:60]
+                    tag = el.get("tag", "")
+                    role = el.get("role", "")
+                    href = el.get("href", "")[:80]
+                    elements_for_worker.append(f"  [{eid}] {role} {tag}: '{text}' {href}")
+                interactive_text = "\n".join(elements_for_worker) if elements_for_worker else "  (no interactive elements detected)"
+                
+                # Step 1: Worker decides action + target_description
+                from cognitive_layer import run_worker_vision_step
+                worker_decision = run_worker_vision_step(
+                    provider, goal, ledger, context, next_steps, interactive_text, rate_limiter
+                )
+                
+                action = worker_decision.get("action", "scroll")
+                target_description = worker_decision.get("target_description", "")
+                v_text = worker_decision.get("text", "")
+                press_key = worker_decision.get("press_key", "Enter")
+                url = worker_decision.get("url", "")
+                reasoning = worker_decision.get("reasoning", "")
+                
+                log(f"[WORKER] action={action} target='{target_description[:80]}' reasoning={reasoning}")
+                
+                if action == "done":
+                    final_answer = worker_decision.get("answer", reasoning)
+                    status = "done"
+                    log(f"\n*** AGENT FINAL ANSWER: {final_answer} ***")
+                    break
+                
+                if action == "navigate":
+                    decision = {"action": "navigate", "url": url, "reasoning": reasoning}
+                elif action == "scroll":
+                    decision = {"action": "scroll", "scroll_pixels": 500, "reasoning": reasoning}
+                elif action in ("click", "type"):
+                    # Step 2: Vision grounds target_description to element_id
+                    log("[VISION] Grounding worker intent to element...")
+                    from cognitive_layer import run_vision_grounding
+                    vision_decision = run_vision_grounding(
+                        vision_provider, 
+                        worker_intent=target_description,
+                        goal=goal,
+                        ledger=ledger,
+                        page_context=context,
+                        elements=context["vision_elements"],
+                        rate_limiter=vision_rate_limiter
+                    )
+                    
+                    element_id = vision_decision.get("element_id", -1)
+                    confidence = vision_decision.get("confidence", 0.0)
+                    v_reasoning = vision_decision.get("reasoning", "")
+                    
+                    log(f"[VISION GROUNDING] element_id={element_id} confidence={confidence:.2f} reasoning={v_reasoning}")
+                    
+                    # DEBUG: Show target element details
+                    if element_id >= 0 and element_id < len(context["vision_elements"]):
+                        target = context["vision_elements"][element_id]
+                        log(f"[VISION DEBUG] Target: id={element_id}, selector={target.get('selector','')[:60]}, text='{target.get('text','')[:50]}', role={target.get('role','')}, bbox={target.get('bbox')}")
+                    
+                    # Vision loop detection
+                    vision_action_key = (element_id, action, v_text)
+                    recent_vision_actions.append(vision_action_key)
+                    if len(recent_vision_actions) > MAX_VISION_REPEATS:
+                        recent_vision_actions.pop(0)
+                    
+                    if recent_vision_actions.count(vision_action_key) >= MAX_VISION_REPEATS:
+                        log(f"[VISION LOOP DETECTED] Same action repeated {MAX_VISION_REPEATS}x")
+                        action = "scroll"
+                        decision = {"action": "scroll", "scroll_pixels": 800, "reasoning": "vision loop break"}
+                        recent_vision_actions.clear()
+                    elif element_id >= 0 and element_id < len(context["vision_elements"]) and confidence > 0.3:
+                        target = context["vision_elements"][element_id]
+                        if action == "click":
+                            decision = {
+                                "action": "vision_click",
+                                "element_id": element_id,
+                                "elements": context["vision_elements"],
+                                "viewport_width": context.get("viewport_width", 1366),
+                                "viewport_height": context.get("viewport_height", 768),
+                                "reasoning": reasoning + " | " + v_reasoning
+                            }
+                        elif action == "type":
+                            decision = {
+                                "action": "vision_type",
+                                "element_id": element_id,
+                                "elements": context["vision_elements"],
+                                "viewport_width": context.get("viewport_width", 1366),
+                                "viewport_height": context.get("viewport_height", 768),
+                                "text": v_text,
+                                "press_key": press_key,
+                                "reasoning": reasoning + " | " + v_reasoning
+                            }
+                        else:
+                            action = "scroll"
+                            decision = {"action": "scroll", "scroll_pixels": 500, "reasoning": "vision fallback"}
+                    else:
+                        log(f"[VISION] Low confidence ({confidence:.2f}) or no match - falling back to scroll")
+                        action = "scroll"
+                        decision = {"action": "scroll", "scroll_pixels": 500, "reasoning": "vision: no confident match"}
+                else:
+                    action = "scroll"
+                    decision = {"action": "scroll", "scroll_pixels": 500, "reasoning": "vision fallback"}
+            else:
+                # Text-based worker (original)
+                decision = run_worker_next_step(provider, goal, ledger, context, next_steps, rate_limiter)
+                action = decision.get("action", "navigate")
+                log(f"[WORKER] {action} -- {decision.get('reasoning', '')}")
 
             # Worker can also declare done (with an answer)
             if action == "done":

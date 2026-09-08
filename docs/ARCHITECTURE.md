@@ -4,24 +4,24 @@
 
 This document describes the architecture of the RunAgent SuperBrowser, an autonomous web agent based on the **RunAgent SuperBrowser** architecture. The system uses an LLM to interpret user intents, determine navigation paths, and execute actions via browser automation.
 
-## High-Level Architecture
+## High-Level Architecture (with Vision)
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     RunAgent SuperBrowser                        │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────┐  │
-│  │  Cognitive   │    │   Action     │    │   Perception     │  │
-│  │    Layer     │◄───│    Layer     │───►│     Layer        │  │
-│  │   (Brain)    │    │   (Body)     │    │    (Eyes)        │  │
-│  └──────────────┘    └──────────────┘    └──────────────────┘  │
-│         │                   │                   │               │
-│         ▼                   ▼                   ▼               │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────┐  │
-│  │  Orchestrator│    │   Planner    │    │     Worker       │  │
-│  │   (Router)   │    │  (Evaluator) │    │    (Executor)    │  │
-│  └──────────────┘    └──────────────┘    └──────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        RunAgent SuperBrowser                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────────┐  │
+│  │  Cognitive   │    │   Action     │    │   Perception + Vision    │  │
+│  │    Layer     │◄───│    Layer     │───►│     Layer (Eyes)         │  │
+│  │   (Brain)    │    │   (Body)     │    │                          │  │
+│  └──────────────┘    └──────────────┘    └──────────────────────────┘  │
+│         │                   │                   │                      │
+│         ▼                   ▼                   ▼                      │
+│  ┌──────────────┐    ┌──────────────┐    ┌────────────────────────┐  │
+│  │  Orchestrator│    │   Planner    │    │  Worker + Vision       │  │
+│  │   (Router)   │    │  (Evaluator) │    │  Grounding             │  │
+│  └──────────────┘    └──────────────┘    └────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Three-Layer Architecture
@@ -33,18 +33,21 @@ This document describes the architecture of the RunAgent SuperBrowser, an autono
   - **Orchestrator**: Task classification (search vs browser)
   - **Planner**: Progress evaluation, verdict decisions
   - **Worker**: Action emission (navigate, click, type, scroll, etc.)
+  - **Vision Grounding**: SeeAct-style visual decision making (§4.3)
 
 ### 2. Action Layer (Body)
 - **Location**: `action_layer.py`
 - **Responsibility**: Execute actions against real Chromium via Playwright
 - **Capabilities**: navigate, click, type, scroll, press, mouseclick, search_google
-- **Features**: Shadow DOM traversal, stealth mode, anti-bot evasion
+- **Vision Actions**: vision_click, vision_type (coordinate-based)
+- **Features**: Shadow DOM traversal, stealth mode, anti-bot evasion, SoM annotation
 
-### 3. Perception Layer (Eyes)
-- **Location**: `action_layer.py` (`extract_page_context` function)
-- **Capabilities**: Title, URL, visible text extraction
+### 3. Perception + Vision Layer (Eyes)
+- **Location**: `action_layer.py` (`extract_page_context`, `build_vision_context`)
+- **Text Perception**: Title, URL, visible text extraction
+- **Vision Perception**: Screenshot capture, Set-of-Marks (SoM) annotation, bounding box extraction
 - **Shadow DOM**: Deep traversal into shadow roots
-- **Interactive Elements**: CSS selector generation with deduplication
+- **Interactive Elements**: CSS selector generation with deduplication + normalized bounding boxes
 
 ## Multi-Provider LLM Architecture
 

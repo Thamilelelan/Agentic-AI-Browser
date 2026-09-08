@@ -2,13 +2,12 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
 .pytest_cache/
 venv/
-env/
 .env
 
-# IDE / Editor
-.obsidian/
+# IDE
 .vscode/
 .idea/
 *.swp
@@ -18,41 +17,47 @@ env/
 .DS_Store
 Thumbs.db
 
-# Project specific - screenshots & images
+# Logs
+*.log
+/tmp/
+
+# Screenshots and media
 screenshots/
 *.png
 *.jpg
 *.jpeg
 *.gif
-*.webp
-"Pasted image*.png"
 
-# Personal notes / docs
-notes.md
-"test prompts.md"
-context.md
-explanation.md
+# Documentation (local)
+*.md
+!docs/
+!README.md
 
-# Temporary / debug scripts
-fix_*.py
-new_*.py
-*_final.py
+# PDFs and docs
+*.pdf
+
+# Backup/temp files
+*.backup
+*.bak
+*.orig
+
+# Vision/test files
+vision.py
+
+# Agent/temp files
 borwser_unit.py
-prompt_browser.py
 browser_llm.py
-
-# Environment / secrets
-.env
-*.key
-*.pem
-
-# Agent/tooling (personal)
-.agents/
+fix_click.py
+fix_click_final.py
+new_click_func.py
+prompt_browser.py
 skills-lock.json
+current implementation.md
+bspc interview.md
 
-# Logs
-*.log
+# Config directories
+.agents/
+.obsidian/
 
-# Coverage
-.coverage
-htmlcov/
+# Test fixtures
+tests/fixtures/

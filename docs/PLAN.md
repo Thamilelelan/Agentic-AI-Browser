@@ -103,56 +103,64 @@ This document outlines the current state of the RunAgent SuperBrowser implementa
 
 ### Critical Missing Features
 
-| Feature | Paper Reference | Priority | Effort |
-|---------|----------------|----------|--------|
-| **Vision Model Integration** | §3.1, §4.3, §6 | **CRITICAL** | High |
-| Screenshot-to-Click Mapping | §4.3, §6.1 | **CRITICAL** | High |
-| Visual Grounding (Bounding Boxes) | §4.3, §6.1 | **CRITICAL** | High |
-| Set-of-Marks (SoM) Prompting | §4.3, §6.1 | **CRITICAL** | High |
-| Visual Grounding Pipeline | §4.3, §6.1 | **CRITICAL** | High |
-| Bounding Box Extraction | §4.3, §6.1 | **CRITICAL** | High |
-| Async Vision Prefetch | §4.3, §4.5 | High | Medium |
-| Compound-Row Splitting | §6.1 | High | Medium |
-| Subgoal-Aware BBox Emphasis | §4.3, §4.4 | High | Medium |
-| Page-Type-Aware Vision Tiering | §4.3 | Medium | Medium |
-| Coverage Pass on Validator | §4.3 | Medium | Medium |
-| Dead-Click Guard | §4.5 | High | Medium |
-| Toggle Awareness | §4.5 | High | Medium |
-| Chevron-Aware BBox Snapper | §6.1, §6.2 | High | High |
-| Three-Tier Click Cascade | §6.3 | High | High |
-| Motor Humanization (Bézier) | §6.4 | Medium | Medium |
-| Direct Navigation Recovery | §6.5 | Medium | Medium |
-| DOM Cache (Procedural Memory) | §4.5 | High | Medium |
-| Six-Phase Eviction Loop | §5.3 | High | High |
-| Screenshot Back-Patch | §5.3 | Medium | Medium |
-| Failure Collapse | §5.3 | Medium | Medium |
-| State-Block Eviction | §5.3 | Medium | Medium |
-| Thinking-Block Strip | §5.3 | Low | Low |
-| Old-Message Gut | §5.3 | Medium | Medium |
-| Element-List Collapse | §5.3 | Low | Low |
-| Declarative vs Procedural Memory | §5.4 | High | High |
-| Role-Sliced Views | §5.5 | High | High |
-| Orchestrator Verb Classifier | §4.2 | High | Medium |
-| Search Worker (HTTP-only) | §4.2 | Medium | Medium |
-| Circuit Breaker (per-domain) | §4.2 | Medium | Medium |
+| Feature | Paper Reference | Priority | Effort | Status |
+|---------|----------------|----------|--------|--------|
+| **Vision Model Integration** | §3.1, §4.3, §6 | **CRITICAL** | High | ✅ **DONE** |
+| Screenshot-to-Click Mapping | §4.3, §6.1 | **CRITICAL** | High | ✅ **DONE** |
+| Visual Grounding (Bounding Boxes) | §4.3, §6.1 | **CRITICAL** | High | ✅ **DONE** |
+| Set-of-Marks (SoM) Prompting | §4.3, §6.1 | **CRITICAL** | High | ✅ **DONE** |
+| Visual Grounding Pipeline | §4.3, §6.1 | **CRITICAL** | High | ✅ **DONE** |
+| Bounding Box Extraction | §4.3, §6.1 | **CRITICAL** | High | ✅ **DONE** |
+| Async Vision Prefetch | §4.3, §4.5 | High | Medium | ⬜ Planned |
+| Compound-Row Splitting | §6.1 | High | Medium | ⬜ Planned |
+| Subgoal-Aware BBox Emphasis | §4.3, §4.4 | High | Medium | ⬜ Planned |
+| Page-Type-Aware Vision Tiering | §4.3 | Medium | Medium | ⬜ Planned |
+| Coverage Pass on Validator | §4.3 | Medium | Medium | ⬜ Planned |
+| Dead-Click Guard | §4.5 | High | Medium | ⬜ Planned |
+| Toggle Awareness | §4.5 | High | Medium | ⬜ Planned |
+| Chevron-Aware BBox Snapper | §6.1, §6.2 | High | High | ⬜ Planned |
+| Three-Tier Click Cascade | §6.3 | High | High | ⬜ Planned |
+| Motor Humanization (Bézier) | §6.4 | Medium | Medium | ⬜ Planned |
+| Direct Navigation Recovery | §6.5 | Medium | Medium | ⬜ Planned |
+| DOM Cache (Procedural Memory) | §4.5 | High | Medium | ⬜ Planned |
+| Six-Phase Eviction Loop | §5.3 | High | High | ⬜ Planned |
+| Screenshot Back-Patch | §5.3 | Medium | Medium | ⬜ Planned |
+| Failure Collapse | §5.3 | Medium | Medium | ⬜ Planned |
+| State-Block Eviction | §5.3 | Medium | Medium | ⬜ Planned |
+| Thinking-Block Strip | §5.3 | Low | Low | ⬜ Planned |
+| Old-Message Gut | §5.3 | Medium | Medium | ⬜ Planned |
+| Element-List Collapse | §5.3 | Low | Low | ⬜ Planned |
+| Declarative vs Procedural Memory | §5.4 | High | High | ⬜ Planned |
+| Role-Sliced Views | §5.5 | High | High | ⬜ Planned |
+| Orchestrator Verb Classifier | §4.2 | High | Medium | ⬜ Planned |
+| Search Worker (HTTP-only) | §4.2 | Medium | Medium | ⬜ Planned |
+| Circuit Breaker (per-domain) | §4.2 | Medium | Medium | ⬜ Planned |
 
 ---
 
 ## PRIORITIZED ROADMAP
 
-### Phase 1: Vision Model Integration (CRITICAL - Weeks 1-3)
+### Phase 1: Vision Model Integration (CRITICAL - Weeks 1-3) ✅ **COMPLETED**
 
-| Task | Description | Effort | Dependencies |
-|------|-------------|--------|--------------|
-| **1.1** | Integrate Vision Model (Qwen2-VL-7B or GPT-4V) | 1 week | Vision model API access |
-| **1.2** | Screenshot Capture Pipeline | 3 days | Playwright `page.screenshot()` |
-| **1.3** | Set-of-Marks (SoM) Annotation | 1 week | Bounding box overlay library |
-| **1.4** | Bounding Box Extraction | 1 week | Playwright `element.bounding_box()` |
-| **1.4** | Set-of-Marks Prompting | 1 week | Prompt engineering |
-| **1.5** | Bounding Box Click Execution | 3 days | `page.mouse.click(x, y)` |
-| **1.6** | Async Vision Prefetch | 1 week | Background task queue |
+| Task | Description | Effort | Dependencies | Status |
+|------|-------------|--------|--------------|--------|
+| **1.1** | Integrate Vision Model (NVIDIA Nemotron Nano VL) | 1 week | Vision model API access | ✅ **DONE** |
+| **1.2** | Screenshot Capture Pipeline | 3 days | Playwright `page.screenshot()` | ✅ **DONE** |
+| **1.3** | Set-of-Marks (SoM) Annotation | 1 week | Bounding box overlay library | ✅ **DONE** |
+| **1.4** | Bounding Box Extraction | 1 week | Playwright `element.bounding_box()` | ✅ **DONE** |
+| **1.4** | Set-of-Marks Prompting | 1 week | Prompt engineering | ✅ **DONE** |
+| **1.5** | Bounding Box Click Execution | 3 days | `page.mouse.click(x, y)` | ✅ **DONE** |
+| **1.6** | Async Vision Prefetch | 1 week | Background task queue | ⬜ Planned |
 
-**Deliverable**: Agent can "see" the page, identify clickable elements via bounding boxes, and click via coordinates.
+**Deliverable**: Agent can "see" the page, identify clickable elements via bounding boxes, and click via coordinates. **ACHIEVED** - Implemented SeeAct-style Planning-then-Grounding with NVIDIA Nemotron Nano VL via NVIDIA Build API.
+
+**Implementation Details:**
+- **Vision Provider**: `NvidiaVisionProvider` in `llm_providers.py` using `llama-3.1-nemotron-nano-vl-8b-v1`
+- **SoM Annotation**: `draw_som_annotations()` in `action_layer.py` - draws numbered bounding boxes on screenshot
+- **Bounding Box Extraction**: `_INTERACTIVE_WITH_BBOX_JS` - extracts normalized (0-1) bboxes for all interactive elements
+- **Vision Grounding**: `run_vision_grounding()` in `cognitive_layer.py` - SeeAct-style prompt with annotated screenshot
+- **Coordinate Click**: `vision_click` action in `action_layer.py` - clicks at bbox center coordinates
+- **Integration**: `EngineConfig.use_vision` flag in `agent_engine.py` enables vision pipeline
 
 ---
 

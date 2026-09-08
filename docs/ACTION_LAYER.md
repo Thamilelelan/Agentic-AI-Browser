@@ -400,3 +400,130 @@ except:
 interactive = page.evaluate(_INTERACTIVE_JS)
 print(json.dumps(json.loads(interactive), indent=2))
 ```
+
+---
+
+## Vision (Set-of-Marks) — RunAgent §4.3, §6.1
+
+The action layer includes vision capabilities for SeeAct-style visual grounding.
+
+### Vision Functions
+
+#### `extract_elements_with_bbox(page) -> dict`
+Extracts interactive elements with normalized bounding boxes (0-1).
+
+```python
+result = extract_elements_with_bbox(page)
+# Returns:
+# {
+#     "elements": [
+#         {"id": 0, "selector": "button.buy", "text": "Buy", "tag": "button", 
+#          "href": "", "role": "[button]", "bbox": [0.5, 0.5, 0.1, 0.05]},
+#         ...
+#     ],
+#     "viewportWidth": 1366,
+#     "viewportHeight": 768
+# }
+```
+
+#### `take_screenshot(page, path=None) -> bytes`
+Captures full-page screenshot as PNG bytes.
+
+#### `draw_som_annotations(screenshot_bytes, elements, output_path=None) -> bytes`
+Draws Set-of-Marks (SoM) numbered bounding boxes on screenshot.
+
+```python
+annotated = draw_som_annotations(screenshot_bytes, elements)
+# Returns annotated PNG bytes with numbered boxes
+```
+
+#### `build_vision_context(page, goal, ledger_text="") -> dict`
+Complete vision pipeline: screenshot + SoM + elements + prompt.
+
+```python
+vision_ctx = build_vision_context(page, "find price", "ledger text...")
+# Returns:
+# {
+#     "screenshot_bytes": b"...",
+#     "annotated_screenshot_bytes": b"...",
+#     "elements": [...],
+#     "viewport_width": 1366,
+#     "viewport_height": 768,
+#     "prompt": "SeeAct-style prompt for VLM..."
+# }
+```
+
+### Vision-Grounded Actions
+
+#### `vision_click` action
+```python
+action = {
+    "action": "vision_click",
+    "element_id": 5,
+    "elements": vision_elements,
+    "viewport_width": 1366,
+    "viewport_height": 768
+}
+execute_action(page, action, log)
+# Clicks at center of element[5]'s bounding box
+```
+
+#### `vision_type` action
+```python
+action = {
+    "action": "vision_type",
+    "element_id": 3,
+    "elements": vision_elements,
+    "viewport_width": 1366,
+    "viewport_height": 768,
+    "text": "search query",
+    "press_key": "Enter"
+}
+execute_action(page, action, log)
+# Types into element[3]'s selector
+```
+
+### JavaScript: `_INTERACTIVE_WITH_BBOX_JS`
+Extended version of `_INTERACTIVE_JS` that returns bounding boxes:
+- Normalized coordinates: `x, y` (center), `width, height` (0-1)
+- Viewport dimensions: `viewportWidth`, `viewportHeight`
+- All elements filtered for visibility and minimum size
+
+### Integration with Agent Engine
+```python
+# In EngineConfig
+config = EngineConfig(
+    use_vision=True,
+    provider_type="nvidia",
+    # ...
+)
+
+# In _run_session_inner (perception loop)
+if config.use_vision and vision_provider:
+    vision_context = build_vision_context(page, goal, ledger.render_for_worker())
+    context["annotated_screenshot_bytes"] = vision_context["annotated_screenshot_bytes"]
+    context["vision_elements"] = vision_context["elements"]
+    # ...
+```
+
+### Vision Grounding Prompt (SeeAct Style)
+```
+You are the VISION GROUNDING module of an autonomous web agent.
+
+User Goal: "find price of iPhone 17 Pro"
+
+INTERACTIVE ELEMENTS:
+  [0] [button] button: 'Add to cart' 
+  [1] [link] a: 'Apple iPhone 17 Pro' https://...
+  [2] [text input] input: '' 
+  ...
+
+TASK: Choose the SINGLE best element ID to interact with.
+
+RESPOND WITH JSON:
+{
+  "element_id": 1,
+  "action": "click",
+  "reasoning": "Product link matches goal"
+}
+```

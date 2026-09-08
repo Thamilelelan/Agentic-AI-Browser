@@ -42,16 +42,18 @@ _PROVIDER_TYPE = os.getenv("api_provider", "gemini").lower()
 # CLI args parsed once at import time
 _PARSER = argparse.ArgumentParser(add_help=False)
 _PARSER.add_argument("--browser", default=os.environ.get("AGENT_BROWSER", "chromium"),
-                     help="chromium | helium | chrome | edge | brave | firefox | zen | cdp")
+                      help="chromium | helium | chrome | edge | brave | firefox | zen | cdp")
 _PARSER.add_argument("--port", type=int, default=int(os.environ.get("AGENT_PORT", "5000")))
 _PARSER.add_argument("--max-steps", type=int, default=int(os.environ.get("AGENT_MAX_STEPS", "8")))
 _PARSER.add_argument("--model", default=None, help="Model name (defaults based on provider)")
+_PARSER.add_argument("--vision", action="store_true", default=True, help="Enable vision grounding (SeeAct style)")
+_PARSER.add_argument("--no-vision", action="store_false", dest="vision", help="Disable vision grounding")
 _ARGS, _ = _PARSER.parse_known_args()
 
 # Determine default model based on provider
 if _ARGS.model is None:
     if _PROVIDER_TYPE == "nvidia":
-        _ARGS.model = "nvidia/nemotron-3-ultra"
+        _ARGS.model = "nvidia/nemotron-3-ultra-550b-a55b"
     else:
         _ARGS.model = "gemini-3.5-flash-lite"
 
@@ -108,7 +110,7 @@ def _log_forwarder(session: Session, log_fn):
 def _run_agent_thread(session: Session, continue_from: dict = None):
     # Select model based on provider
     if _PROVIDER_TYPE == "nvidia":
-        default_model = "nvidia/nemotron-3-ultra"
+        default_model = "nvidia/nemotron-3-ultra-550b-a55b"
         # NVIDIA has higher rate limit (40/min), allow more steps
         default_max_steps = 20
     else:
@@ -122,6 +124,7 @@ def _run_agent_thread(session: Session, continue_from: dict = None):
         headless=False,
         keep_browser_open=True,  # UI: leave browser open so user can interact
         provider_type=_PROVIDER_TYPE,
+        use_vision=_ARGS.vision,  # Enable vision grounding (SeeAct style)
     )
     if _BROWSER_SPEC:
         config.browser = _BROWSER_SPEC.browser
@@ -299,4 +302,5 @@ if __name__ == "__main__":
     print(f"  provider: {_PROVIDER_TYPE}")
     print(f"  model   : {_ARGS.model}")
     print(f"  steps   : {_ARGS.max_steps}")
+    print(f"  vision  : {'enabled' if _ARGS.vision else 'disabled'}")
     app.run(host="0.0.0.0", port=_ARGS.port, debug=False, threaded=True)
