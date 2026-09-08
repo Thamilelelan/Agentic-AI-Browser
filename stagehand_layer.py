@@ -54,56 +54,27 @@ class StagehandLayer:
             return False
             
         try:
-            # Stagehand expects a Playwright page object
-            # We need to create Stagehand with our custom LLM callback
-            # Stagehand's Python SDK uses a specific API...
-            # Let me check the actual Stagehand Python SDK API
-            
-            # Based on Stagehand docs, we can pass a custom generate function
-            # But first, let's try the standard way with Browserbase
-            
-            # For now, we'll create a wrapper that uses Stagehand's act()
-            # with a custom model via the ModelGateway or direct API
-            
-            # Actually, Stagehand Python SDK requires Browserbase or local browser
-            # It connects via CDP. Let's see...
-            
-            # The Stagehand.create() method takes a browser (Playwright browser)
-            # and a model config. We'll pass our page's browser context.
+            # Stagehand's Python SDK requires the browser to be created by 
+            # local_browser or browserbase. CDP-attached browsers are not supported.
+            # Check if we're using a CDP-attached browser
+            if self.config.browser == "cdp" or "cdp" in str(self.page.context.browser):
+                self.log("[STAGEHAND] CDP-attached browser detected, Stagehand requires local_browser/browserbase. Falling back to vision pipeline.")
+                self._initialized = False
+                return False
             
             from stagehand import Stagehand
-            
-            # Get the browser from the page
-            browser = self.page.context.browser
-            
-            # Create Stagehand with our custom model
-            # Stagehand supports custom generate callbacks
-            # For NVIDIA Build, we use the OpenAI-compatible endpoint
             
             self.stagehand = await Stagehand.create(
                 browser=self.page.context.browser,
                 model="moonshotai/kimi-k3",
-                # For custom models, Stagehand may need specific config
-                # Let's check if we can pass a generate callback
             )
-            
-            # Stagehand doesn't directly support custom callbacks in Python SDK yet
-            # The TypeScript SDK supports `generate` callback
-            # Python SDK may have limited support
-            
-            # Alternative: Use Stagehand with Browserbase ModelGateway
-            # which supports moonshotai/kimi-k3 if available
-            # Or use local_browser mode
-            
-            # For now, let's try to use Stagehand's act with the default
-            # and fallback to our custom implementation
             
             self._initialized = True
             self.log("[STAGEHAND] Initialized successfully")
             return True
             
         except Exception as e:
-            self.log(f"[STAGEHAND] Initialization failed: {e}")
+            self.log(f"[STAGEHAND] Initialization failed: {e}. Falling back to vision pipeline.")
             self._initialized = False
             return False
     
