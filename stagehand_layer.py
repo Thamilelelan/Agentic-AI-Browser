@@ -10,8 +10,7 @@ from typing import Optional, Callable, Any
 from dataclasses import dataclass
 
 try:
-    from stagehand import Stagehand
-    from stagehand.schemas import ActResult
+    from stagehand import Stagehand, ActResult
     STAGEHAND_AVAILABLE = True
 except ImportError:
     STAGEHAND_AVAILABLE = False

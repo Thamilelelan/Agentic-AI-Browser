@@ -185,7 +185,6 @@ def _run_agent_thread(session: Session):
             "status": session.status,
             "browser_alive": session.browser_obj is not None,
         })
-    finally:
         loop.close()
 
 

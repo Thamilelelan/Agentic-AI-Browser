@@ -47,7 +47,7 @@ from cognitive_layer import (
 )
 from llm_providers import LLMProvider, LLMConfig, create_llm_provider, get_rate_limiter, create_vision_provider
 from memory import Ledger, StepOutcome
-from stagehand_layer import StagehandLayer, StagehandConfig
+from stagehand_layer import StagehandLayer, StagehandConfig, STAGEHAND_AVAILABLE
 FAILED_CLICK_THRESHOLD = 2
 FALLBACK_URLS = [
     "https://duckduckgo.com/",
