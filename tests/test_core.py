@@ -61,19 +61,21 @@ class TestLLMProviders:
 
 
 class TestRateLimiter:
-    def test_rate_limiter_basic(self):
+    @pytest.mark.asyncio
+    async def test_rate_limiter_basic(self):
         limiter = RateLimiter(max_requests=5, window_seconds=60)
         for i in range(5):
-            limiter.wait_if_needed()
+            await limiter.wait_if_needed()
         assert len(limiter.timestamps) == 5
-    
-    def test_rate_limiter_wait(self):
+
+    @pytest.mark.asyncio
+    async def test_rate_limiter_wait(self):
         import time
         limiter = RateLimiter(max_requests=2, window_seconds=1)
         start = time.time()
-        limiter.wait_if_needed()
-        limiter.wait_if_needed()
-        limiter.wait_if_needed()  # This should wait
+        await limiter.wait_if_needed()
+        await limiter.wait_if_needed()
+        await limiter.wait_if_needed()  # This should wait
         elapsed = time.time() - start
         assert elapsed >= 1.0  # Should have waited at least 1 second
 

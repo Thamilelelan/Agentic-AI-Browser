@@ -1,4 +1,4 @@
-"""Flask web UI for the RunAgent SuperBrowser agent.
+"""Flask web UI for the RunAgent SuperBrowser agent (async version).
 
 Architecture:
 - POST /api/run   starts an agent run in a background thread, returns a session_id
@@ -6,7 +6,7 @@ Architecture:
 - GET  /          renders the chat-style side panel UI (Comet-like)
 - POST /api/close-browser  kill the running browser
 
-The agent runs in a worker thread so the UI stays responsive. The browser
+The agent runs in a background thread so the UI stays responsive. The browser
 itself runs in headless=False mode so you can see it on your desktop while
 you chat with the agent.
 
@@ -25,6 +25,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
+import asyncio
 
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 from dotenv import load_dotenv
@@ -32,7 +33,6 @@ from dotenv import load_dotenv
 from agent_engine import EngineConfig, run_session
 from browser_config import resolve_browser
 from llm_providers import create_llm_provider
-
 
 load_dotenv()
 
@@ -53,7 +53,7 @@ _ARGS, _ = _PARSER.parse_known_args()
 # Determine default model based on provider
 if _ARGS.model is None:
     if _PROVIDER_TYPE == "nvidia":
-        _ARGS.model = "nvidia/nemotron-3-ultra-550b-a55b"
+        _ARGS.model = "moonshotai/kimi-k3"
     else:
         _ARGS.model = "gemini-3.5-flash-lite"
 
@@ -107,10 +107,11 @@ def _log_forwarder(session: Session, log_fn):
     return _inner
 
 
-def _run_agent_thread(session: Session, continue_from: dict = None):
+def _run_agent_thread(session: Session):
+    """Run the async agent in a new event loop."""
     # Select model based on provider
     if _PROVIDER_TYPE == "nvidia":
-        default_model = "nvidia/nemotron-3-ultra-550b-a55b"
+        default_model = "moonshotai/kimi-k3"
         # NVIDIA has higher rate limit (40/min), allow more steps
         default_max_steps = 20
     else:
@@ -124,7 +125,7 @@ def _run_agent_thread(session: Session, continue_from: dict = None):
         headless=False,
         keep_browser_open=True,  # UI: leave browser open so user can interact
         provider_type=_PROVIDER_TYPE,
-        use_vision=_ARGS.vision,  # Enable vision grounding (SeeAct style)
+        use_vision=True,  # Enable vision grounding (SeeAct style)
     )
     if _BROWSER_SPEC:
         config.browser = _BROWSER_SPEC.browser
@@ -140,6 +141,10 @@ def _run_agent_thread(session: Session, continue_from: dict = None):
             "msg": "[boot] browser spec missing — engine will fall back to bundled chromium",
         })
 
+    # Create a new event loop for this thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     try:
         from llm_providers import create_llm_provider, get_rate_limiter
         from agent_engine import run_session
@@ -147,11 +152,22 @@ def _run_agent_thread(session: Session, continue_from: dict = None):
         provider = create_llm_provider()
         rate_limiter = get_rate_limiter(_PROVIDER_TYPE)
         
-        result = run_session(
-            goal=session.goal,
-            provider=provider,
-            config=config,
-            log=_log_forwarder(session, print),
+        # Run the async session in this thread's event loop
+        result = loop.run_until_complete(
+            run_session(
+                goal=session.goal,
+                provider=create_llm_provider(),
+                config=EngineConfig(
+                    model=_ARGS.model if _ARGS.model != "gemini-3.5-flash-lite" else default_model,
+                    max_steps=_ARGS.max_steps if _ARGS.max_steps != 8 else default_max_steps,
+                    headless=False,
+                    keep_browser_open=True,
+                    provider_type=_PROVIDER_TYPE,
+                    use_vision=True,
+                    browser=_ARGS.browser if _ARGS.browser != "chromium" else "chromium",
+                ),
+                log=_log_forwarder(session, print),
+            )
         )
         session.final_answer = result["final_answer"]
         session.status = result["status"]
@@ -169,6 +185,8 @@ def _run_agent_thread(session: Session, continue_from: dict = None):
             "status": session.status,
             "browser_alive": session.browser_obj is not None,
         })
+    finally:
+        loop.close()
 
 
 # ----- Routes ---------------------------------------------------------------
@@ -285,7 +303,7 @@ def api_continue(sid: str):
             break
     
     session.thread = threading.Thread(
-        target=_run_agent_thread, args=(session, None), daemon=True,
+        target=_run_agent_thread, args=(session,), daemon=True,
     )
     session.thread.start()
     
@@ -302,5 +320,5 @@ if __name__ == "__main__":
     print(f"  provider: {_PROVIDER_TYPE}")
     print(f"  model   : {_ARGS.model}")
     print(f"  steps   : {_ARGS.max_steps}")
-    print(f"  vision  : {'enabled' if _ARGS.vision else 'disabled'}")
+    print(f"  vision  : enabled")
     app.run(host="0.0.0.0", port=_ARGS.port, debug=False, threaded=True)

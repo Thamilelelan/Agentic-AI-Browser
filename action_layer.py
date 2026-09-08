@@ -1,4 +1,4 @@
-"""Action layer: Playwright action execution + page perception.
+"""Action layer: Playwright action execution + page perception (async version).
 
 Per RunAgent SuperBrowser §6: actions are simple primitives (navigate / click
 / type / scroll / press / mouseclick) executed against a real Chromium. The
@@ -14,12 +14,14 @@ import json
 import base64
 from io import BytesIO
 from typing import Optional
+import asyncio
 
 try:
     from PIL import Image, ImageDraw, ImageFont
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
+
 
 STEALTH_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -44,29 +46,29 @@ STEALTH_INIT_SCRIPT = """
 """
 
 
-def create_stealth_page(browser, headless: bool = False):
-    context = browser.new_context(
+async def create_stealth_page(browser, headless: bool = False):
+    context = await browser.new_context(
         user_agent=STEALTH_USER_AGENT,
         viewport={"width": 1366, "height": 768},
         locale="en-US",
         timezone_id="Asia/Kolkata",
     )
-    page = context.new_page()
-    page.add_init_script(STEALTH_INIT_SCRIPT)
+    page = await context.new_page()
+    await page.add_init_script(STEALTH_INIT_SCRIPT)
     return page
 
 
-def create_stealth_page_firefox(browser):
+async def create_stealth_page_firefox(browser):
     """Firefox-friendly variant. Firefox doesn't expose user_agent via
     new_context() and doesn't strip navigator.webdriver the same way —
     stealth is less effective here."""
-    context = browser.new_context(
+    context = await browser.new_context(
         viewport={"width": 1366, "height": 768},
         locale="en-US",
         timezone_id="Asia/Kolkata",
     )
-    page = context.new_page()
-    page.set_extra_http_headers({
+    page = await context.new_page()
+    await page.set_extra_http_headers({
         "User-Agent": STEALTH_USER_AGENT,
     })
     return page
@@ -117,7 +119,7 @@ _INTERACTIVE_JS = """() => {
         const tag = el.tagName.toLowerCase();
         if (el.id) {
             const s = escapeId(el.id);
-            if (s and document.querySelectorAll(s).length === 1) return s;
+            if (s && document.querySelectorAll(s).length === 1) return s;
         }
         if (el.name) {
             const s = tag + '[name="' + escapeAttr(el.name) + '"]';
@@ -131,6 +133,7 @@ _INTERACTIVE_JS = """() => {
                     if (document.querySelectorAll(s).length <= 5) return s;
                 } catch (e) {}
             }
+        }
         if (typeof el.className === 'string' && el.className.trim()) {
             const cls = el.className.trim().split(/\\s+/).slice(0, 2).join(' ');
             const s = tag + escapeClass(cls);
@@ -149,7 +152,7 @@ _INTERACTIVE_JS = """() => {
         if (!isVisible(el)) continue;
 
         const tag = el.tagName.toLowerCase();
-        const text = (el.innerText or el.value or el.placeholder or el.getAttribute('aria-label') or '').trim().slice(0, 80);
+        const text = (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || '').trim().slice(0, 80);
         const selector = makeSelector(el);
 
         if (!selector) continue;
@@ -158,8 +161,8 @@ _INTERACTIVE_JS = """() => {
 
         let roleLabel = '';
         if (tag == 'input') {
-            roleLabel = '[' + (el.type or 'text') + ' input]';
-        } else if (tag == 'button' or el.getAttribute('role') == 'button') {
+            roleLabel = '[' + (el.type || 'text') + ' input]';
+        } else if (tag == 'button' || el.getAttribute('role') == 'button') {
             roleLabel = '[button]';
         } else if (tag == 'select') {
             roleLabel = '[dropdown]';
@@ -173,7 +176,7 @@ _INTERACTIVE_JS = """() => {
             selector: selector,
             text: text,
             tag: tag,
-            href: el.getAttribute('href') or '',
+            href: el.getAttribute('href') || '',
             role: roleLabel
         });
 
@@ -184,10 +187,10 @@ _INTERACTIVE_JS = """() => {
 """
 
 
-def extract_page_context(page) -> dict:
+async def extract_page_context(page) -> dict:
     ctx = {}
     try:
-        ctx["title"] = page.title()
+        ctx["title"] = await page.title()
     except Exception:
         ctx["title"] = ""
     try:
@@ -195,29 +198,29 @@ def extract_page_context(page) -> dict:
     except Exception:
         ctx["url"] = ""
     try:
-        ctx["text"] = page.inner_text("body")
+        ctx["text"] = await page.inner_text("body")
     except Exception:
         ctx["text"] = ""
 
     try:
         # YouTube needs extra time for shadow DOM to hydrate
         if "youtube.com" in page.url:
-            page.wait_for_timeout(2000)
+            await page.wait_for_timeout(2000)
             # Force a re-layout to ensure shadow roots are attached
-            page.evaluate("""() => {
+            await page.evaluate("""() => {
                 document.body.style.display = 'none';
                 document.body.offsetHeight; // force reflow
                 document.body.style.display = '';
             }""")
         # Amazon needs extra time for dynamic content
         elif "amazon." in page.url:
-            page.wait_for_timeout(4000)
+            await page.wait_for_timeout(4000)
             # Wait for product grid to load
             try:
-                page.wait_for_selector('[data-component-type="s-search-result"], .s-result-item, [data-asin], .sg-col-inner', timeout=8000)
+                await page.wait_for_selector('[data-component-type="s-search-result"], .s-result-item, [data-asin], .sg-col-inner', timeout=8000)
             except Exception:
                 pass
-        interactive = page.evaluate(_INTERACTIVE_JS)
+        interactive = await page.evaluate(_INTERACTIVE_JS)
         ctx["interactive"] = json.dumps(interactive, indent=2)
     except Exception as e:
         ctx["interactive"] = "[]  // error: " + str(e)
@@ -317,9 +320,9 @@ _INTERACTIVE_WITH_BBOX_JS = """() => {
         const x = (rect.left + rect.width / 2) / viewportWidth;
         const y = (rect.top + rect.height / 2) / viewportHeight;
         const width = rect.width / viewportWidth;
-        const height = rect.height / viewportHeight;
+        const height = rect.height / viewportHeight.
 
-        if (x < 0 || x > 1 || y < 0 || y > 1 || width < 0.01 || height < 0.01) continue;
+        if (x < 0 || x > 1 || y < 0 || y > 1 || width < 0.01 || height < 0.01) continue.
 
         let roleLabel = '';
         if (tag == 'input') {
@@ -351,19 +354,19 @@ _INTERACTIVE_WITH_BBOX_JS = """() => {
 }"""
 
 
-def extract_elements_with_bbox(page) -> dict:
+async def extract_elements_with_bbox(page) -> dict:
     """Extract interactive elements with bounding boxes from page.
     Returns dict with elements list and viewport dimensions."""
     try:
-        result = page.evaluate(_INTERACTIVE_WITH_BBOX_JS)
+        result = await page.evaluate(_INTERACTIVE_WITH_BBOX_JS)
         return result
     except Exception as e:
         return {"elements": [], "viewportWidth": 1366, "viewportHeight": 768, "error": str(e)}
 
 
-def take_screenshot(page, path: Optional[str] = None, timeout: int = 60000) -> bytes:
+async def take_screenshot(page, path: Optional[str] = None, timeout: int = 60000) -> bytes:
     """Take screenshot and return as bytes. Optionally save to path."""
-    screenshot_bytes = page.screenshot(type="png", timeout=timeout)
+    screenshot_bytes = await page.screenshot(type="png", timeout=timeout)
     if path:
         with open(path, "wb") as f:
             f.write(screenshot_bytes)
@@ -446,10 +449,10 @@ def draw_som_annotations(
     return result_bytes
 
 
-def build_vision_context(page, goal: str, ledger_text: str = "") -> dict:
+async def build_vision_context(page, goal: str, ledger_text: str = "") -> dict:
     """Build complete vision context: screenshot + SoM + elements list."""
-    screenshot_bytes = take_screenshot(page, timeout=60000)
-    extraction = extract_elements_with_bbox(page)
+    screenshot_bytes = await take_screenshot(page, timeout=60000)
+    extraction = await extract_elements_with_bbox(page)
     elements = extraction.get("elements", [])
     viewport_width = extraction.get("viewportWidth", 1366)
     viewport_height = extraction.get("viewportHeight", 768)
@@ -498,9 +501,9 @@ CRITICAL RULES:
 - If multiple similar elements, pick the one most relevant to goal
 
 DOMAIN-SPECIFIC GUIDANCE:
-- YouTube: "play video" or "watch" → go to youtube.com, search channel/video, click video link
+- YouTube: "play video" or "watch" -> go to youtube.com, search channel/video, click video link
 - MKBHD / Marques Brownlee: YouTube channel @mkbhd, latest videos on homepage or /videos tab
-- Amazon: product search → type in #twotabsearchtextbox, press Enter, click result link
+- Amazon: product search -> type in #twotabsearchtextbox, press Enter, click result link
 - Google Search: type in search box, press Enter
 - If on wrong site for goal (e.g., Amazon when goal is YouTube), navigate to correct site first
 - Don't type same text repeatedly - if input already has text, click search button or press Enter
@@ -520,19 +523,20 @@ DOMAIN-SPECIFIC GUIDANCE:
 # ----- Action execution ----------------------------------------------------
 
 
-def _click_via_selector(page, selector: str, text_hint: str = "") -> bool:
+async def _click_via_selector(page, selector: str, text_hint: str = "") -> bool:
     """Simple, reliable click strategy - just use the selector with force click."""
     # Strategy 1: Try the provided selector directly
     try:
         locator = page.locator(selector)
-        if locator.count() > 0:
+        count = await locator.count()
+        if count > 0:
             first = locator.first
-            if first.is_visible():
-                first.click(timeout=3000)
+            if await first.is_visible():
+                await first.click(timeout=3000)
                 return True
             else:
                 # Try force click for hidden/overlapped elements
-                first.click(force=True, timeout=3000)
+                await first.click(force=True, timeout=3000)
                 return True
     except Exception:
         pass
@@ -540,7 +544,7 @@ def _click_via_selector(page, selector: str, text_hint: str = "") -> bool:
     # Strategy 2: If we have a text hint but selector failed, try JavaScript click
     if text_hint:
         try:
-            result = page.evaluate(f"""() => {{
+            result = await page.evaluate(f"""() => {{
                 // Find elements containing the text
                 const elements = Array.from(document.querySelectorAll('a, button, span, div, input, button'));
                 const target = elements.find(el => el.innerText && el.innerText.includes('{text_hint}'));
@@ -559,7 +563,7 @@ def _click_via_selector(page, selector: str, text_hint: str = "") -> bool:
     if text_hint and ("youtube.com" in page.url or "youtu.be" in page.url):
         try:
             # Try to find the link element and extract its href
-            result = page.evaluate(f"""() => {{
+            result = await page.evaluate(f"""() => {{
                 // Find link elements containing the text
                 const elements = Array.from(document.querySelectorAll('a[href]'));
                 const target = elements.find(el => el.innerText && el.innerText.includes('{text_hint}'));
@@ -570,15 +574,17 @@ def _click_via_selector(page, selector: str, text_hint: str = "") -> bool:
             }}""")
             if result and result.startswith('http'):
                 # Navigate directly to the video URL
-                log(f"[VERIFICATION] Navigating directly to video URL: {result}")
-                page.goto(result, wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_timeout(3000)
+                print(f"[VERIFICATION] Navigating directly to video URL: {result}")
+                await page.goto(result, wait_until="domcontentloaded", timeout=15000)
+                await page.wait_for_timeout(3000)
                 return True
         except Exception:
             pass
     
     return False
-def execute_action(page, action: dict, log) -> tuple[bool, str]:
+
+
+async def execute_action(page, action: dict, log) -> tuple[bool, str]:
     """Run one action. Returns (success, result_note)."""
     kind = action.get("action", "")
     if kind == "navigate":
@@ -587,17 +593,17 @@ def execute_action(page, action: dict, log) -> tuple[bool, str]:
             return False, "navigate without url"
         log("-- ACTION LAYER: Navigating to " + url)
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
             # Extra wait for dynamic sites (YouTube, SPA)
             if "youtube.com" in url or "youtu.be" in url:
-                page.wait_for_timeout(5000)  # YouTube needs time for dynamic content
+                await page.wait_for_timeout(5000)  # YouTube needs time for dynamic content
                 # Wait for at least one video element to appear
                 try:
-                    page.wait_for_selector('ytd-rich-grid-renderer, ytd-video-renderer, #contents', timeout=8000)
+                    await page.wait_for_selector('ytd-rich-grid-renderer, ytd-video-renderer, #contents', timeout=8000)
                 except Exception:
                     pass
             else:
-                page.wait_for_timeout(3000)
+                await page.wait_for_timeout(3000)
             return True, "navigated to " + page.url
         except Exception as e:
             return False, "navigation failed: " + str(e)
@@ -606,9 +612,9 @@ def execute_action(page, action: dict, log) -> tuple[bool, str]:
         selector = action.get("selector", "")
         text_hint = action.get("text", "")
         log("-- ACTION LAYER: Clicking '" + selector + "'")
-        ok = _click_via_selector(page, selector, text_hint)
+        ok = await _click_via_selector(page, selector, text_hint)
         if ok:
-            page.wait_for_timeout(2500)
+            await page.wait_for_timeout(2500)
             return True, "click ok"
         return False, "selector '" + selector + "' not found"
 
@@ -618,33 +624,33 @@ def execute_action(page, action: dict, log) -> tuple[bool, str]:
         press_k = action.get("press_key")
         log("-- ACTION LAYER: Typing '" + text + "' into '" + sel + "'")
         try:
-            page.fill(sel, text, timeout=3000)
+            await page.fill(sel, text, timeout=3000)
         except Exception:
             try:
-                page.locator(sel).fill(text, timeout=3000)
+                await page.locator(sel).fill(text, timeout=3000)
             except Exception:
-                page.keyboard.type(text, delay=50)
+                await page.keyboard.type(text, delay=50)
                 log("-- ACTION LAYER: Typed via keyboard fallback")
         if press_k:
             try:
-                page.keyboard.press(press_k)
+                await page.keyboard.press(press_k)
             except Exception:
                 pass
-        page.wait_for_timeout(2000)
+        await page.wait_for_timeout(2000)
         return True, "typed '" + text + "'"
 
     elif kind == "scroll":
         pixels = int(action.get("scroll_pixels", 500))
         log("-- ACTION LAYER: Scrolling " + str(pixels) + "px")
-        page.evaluate("window.scrollBy(0, " + str(pixels) + ")")
-        page.wait_for_timeout(1000)
+        await page.evaluate("window.scrollBy(0, " + str(pixels) + ")")
+        await page.wait_for_timeout(1000)
         return True, "scrolled " + str(pixels) + "px"
 
     elif kind == "press":
         key = action.get("press_key", "Enter")
         log("-- ACTION LAYER: Pressing '" + key + "'")
-        page.keyboard.press(key)
-        page.wait_for_timeout(2000)
+        await page.keyboard.press(key)
+        await page.wait_for_timeout(2000)
         return True, "pressed " + key
 
     elif kind == "mouseclick":
@@ -652,8 +658,8 @@ def execute_action(page, action: dict, log) -> tuple[bool, str]:
         y = int(action.get("y", 0))
         log("-- ACTION LAYER: Mouse-clicking at (" + str(x) + ", " + str(y) + ")")
         try:
-            page.mouse.click(x, y)
-            page.wait_for_timeout(2500)
+            await page.mouse.click(x, y)
+            await page.wait_for_timeout(2500)
             return True, "mouse click successful"
         except Exception as e:
             return False, "mouse click failed: " + str(e)
@@ -678,8 +684,8 @@ def execute_action(page, action: dict, log) -> tuple[bool, str]:
         log(f"-- ACTION LAYER: Vision click element [{element_id}] at ({click_x}, {click_y}) - {target.get('role','')} '{target.get('text','')[:40]}'")
         
         try:
-            page.mouse.click(click_x, click_y)
-            page.wait_for_timeout(2500)
+            await page.mouse.click(click_x, click_y)
+            await page.wait_for_timeout(2500)
             return True, f"vision click ok on element [{element_id}]"
         except Exception as e:
             return False, f"vision click failed: {str(e)}"
@@ -702,26 +708,26 @@ def execute_action(page, action: dict, log) -> tuple[bool, str]:
         log(f"-- ACTION LAYER: Vision type into element [{element_id}] ({selector})")
         
         try:
-            page.fill(selector, text, timeout=3000)
+            await page.fill(selector, text, timeout=3000)
         except Exception:
             try:
-                page.locator(selector).fill(text, timeout=3000)
+                await page.locator(selector).fill(text, timeout=3000)
             except Exception:
                 bbox = target.get("bbox", [0, 0, 0, 0])
                 x, y, w, h = bbox
                 click_x = int(x * viewport_width)
                 click_y = int(y * viewport_height)
-                page.mouse.click(click_x, click_y)
-                page.wait_for_timeout(500)
-                page.keyboard.type(text, delay=50)
+                await page.mouse.click(click_x, click_y)
+                await page.wait_for_timeout(500)
+                await page.keyboard.type(text, delay=50)
                 log("-- ACTION LAYER: Typed via keyboard fallback after vision click")
         
         if press_k:
             try:
-                page.keyboard.press(press_k)
+                await page.keyboard.press(press_k)
             except Exception:
                 pass
-        page.wait_for_timeout(2000)
+        await page.wait_for_timeout(2000)
         return True, f"vision typed '{text}' into element [{element_id}]"
 
     return False, "unknown action: " + kind

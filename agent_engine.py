@@ -1,4 +1,4 @@
-"""Agent engine: wires together the three cognitive roles + Ledger + actions.
+"""Agent engine: wires together the three cognitive roles + Ledger + actions (async version).
 
 Implements Algorithm 1 from RunAgent SuperBrowser (§4.1):
 
@@ -18,12 +18,11 @@ Vision integration (SeeAct style, §4.3, §6.1):
     - Execute coordinate-based click via vision_click
 """
 import os
-import time
 import tempfile
 from dataclasses import dataclass
 from typing import Callable
 
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 
 from action_layer import (
     create_stealth_page,
@@ -39,9 +38,10 @@ from cognitive_layer import (
     run_planner,
     run_worker_first_step,
     run_worker_next_step,
+    run_worker_vision_step,
     run_vision_grounding,
 )
-from llm_providers import LLMProvider, LLMConfig, create_llm_provider, get_rate_limiter, create_vision_provider, get_vision_rate_limiter
+from llm_providers import LLMProvider, LLMConfig, create_llm_provider, get_rate_limiter, create_vision_provider
 from memory import Ledger, StepOutcome
 
 
@@ -57,20 +57,19 @@ FALLBACK_URLS = [
 VERIFICATION_SEARCH_URL = "https://www.google.com/search?q="  # Google search for verification
 
 
-def search_and_verify(page, query: str, log) -> str:
+async def search_and_verify(page, query: str, log) -> str:
     """Search Google to verify if something exists. Returns the search results text."""
     log(f"[VERIFICATION] Searching Google for: {query}")
-    search_url = VERIFICATION_SEARCH_URL + query.replace(" ", "+")
     try:
-        page.goto(f"https://www.google.com/search?q={query.replace(' ', '+')}", wait_until="domcontentloaded", timeout=15000)
-        page.wait_for_timeout(3000)
+        await page.goto(f"https://www.google.com/search?q={query.replace(' ', '+')}", wait_until="domcontentloaded", timeout=15000)
+        await page.wait_for_timeout(3000)
         # Wait for search results
         try:
-            page.wait_for_selector('#search, #rso, .g, .tF2Cxc', timeout=8000)
+            await page.wait_for_selector('#search, #rso, .g, .tF2Cxc', timeout=8000)
         except Exception:
             pass
-        page.wait_for_timeout(2000)
-        text = extract_page_context(page).get("text", "")
+        await page.wait_for_timeout(2000)
+        text = (await extract_page_context(page)).get("text", "")
         log(f"[VERIFICATION] Search results length: {len(text)} chars")
         return text
     except Exception as e:
@@ -78,9 +77,20 @@ def search_and_verify(page, query: str, log) -> str:
         return ""
 
 
+def _classify_search_intent(text: str) -> bool:
+    """Heuristic: if the page text looks like a search-results page and
+    contains no obvious answer, the search 'failed'."""
+    keywords_no_results = [
+        "no results found", "did not match any", "0 results",
+        "no videos found", "no posts found", "no matches",
+    ]
+    text_low = text.lower()
+    return any(k in text_low for k in keywords_no_results)
+
+
 @dataclass
 class EngineConfig:
-    max_steps: int = MAX_STEPS
+    max_steps: int = 8
     headless: bool = False
     rate_limit_per_min: int = 15
     # Browser selection. 'chromium' (default) uses Playwright's bundled build.
@@ -101,18 +111,7 @@ class EngineConfig:
     vision_model: str = "nvidia/llama-3.1-nemotron-nano-vl-8b-v1"
 
 
-def _classify_search_intent(text: str) -> bool:
-    """Heuristic: if the page text looks like a search-results page and
-    contains no obvious answer, the search 'failed'."""
-    keywords_no_results = [
-        "no results found", "did not match any", "0 results",
-        "no videos found", "no posts found", "no matches",
-    ]
-    text_low = text.lower()
-    return any(k in text_low for k in keywords_no_results)
-
-
-def run_session(
+async def run_session(
     goal: str,
     provider: LLMProvider,
     config: EngineConfig,
@@ -145,40 +144,40 @@ def run_session(
             log(f"[ENGINE] Failed to create vision provider: {e}. Disabling vision.")
             config.use_vision = False
 
-    with sync_playwright() as p:
+    async with async_playwright() as p:
         if config.browser == "cdp":
             # Connect to an already-running browser via CDP
             cdp_url = config.executable_path or os.environ.get("CDP_URL", "http://localhost:9222")
             log(f"[CDP] Connecting to {cdp_url} ...")
-            browser = p.chromium.connect_over_cdp(cdp_url)
+            browser = await p.chromium.connect_over_cdp(cdp_url)
             # For CDP, we don't control the browser context — it's the user's.
             # Just pick the first context/page or create a new one.
             contexts = browser.contexts
             if contexts:
                 context = contexts[0]
                 pages = context.pages
-                page = pages[0] if pages else context.new_page()
+                page = pages[0] if pages else await context.new_page()
             else:
-                context = browser.new_context()
-                page = context.new_page()
+                context = await browser.new_context()
+                page = await context.new_page()
             # CDP browser is externally managed — don't close it in finally.
             config.keep_browser_open = True
         else:
             log(f"Launching browser with stealth profile...")
-            browser = p.chromium.launch(
+            browser = await p.chromium.launch(
                 headless=config.headless,
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                 ],
             )
-            page = create_stealth_page(browser, headless=config.headless)
+            page = await create_stealth_page(browser, headless=config.headless)
 
         provider_used = config.provider_type
         provider_fallback = False
         
         try:
-            status, final_answer, step_count, context = _run_session_inner(
+            status, final_answer, step_count, context = await _run_session_inner(
                 p, browser, page, goal, provider, config, rate_limiter,
                 vision_provider, vision_rate_limiter, ledger, log, is_continuation, start_context,
             )
@@ -193,8 +192,9 @@ def run_session(
                 os.environ["api_provider"] = "gemini"
                 provider = create_llm_provider()
                 rate_limiter = get_rate_limiter("gemini")
+                vision_rate_limiter = get_rate_limiter("vision")
                 # Retry with Gemini
-                status, final_answer, step_count, context = _run_session_inner(
+                status, final_answer, step_count, context = await _run_session_inner(
                     p, browser, page, goal, provider, config, rate_limiter,
                     vision_provider, vision_rate_limiter, ledger, log, is_continuation, start_context,
                 )
@@ -209,7 +209,8 @@ def run_session(
                 os.environ["api_provider"] = "gemini"
                 provider = create_llm_provider()
                 rate_limiter = get_rate_limiter("gemini")
-                status, final_answer, step_count, context = _run_session_inner(
+                vision_rate_limiter = get_rate_limiter("vision")
+                status, final_answer, step_count, context = await _run_session_inner(
                     p, browser, page, goal, provider, config, rate_limiter,
                     vision_provider, vision_rate_limiter, ledger, log, is_continuation, start_context,
                 )
@@ -218,7 +219,7 @@ def run_session(
         finally:
             if not config.keep_browser_open:
                 try:
-                    browser.close()
+                    await browser.close()
                     log("Browser closed.")
                 except Exception:
                     pass
@@ -238,7 +239,7 @@ def run_session(
     return result
 
 
-def _run_session_inner(p, browser, page, goal, provider, config,
+async def _run_session_inner(p, browser, page, goal, provider, config,
                        rate_limiter, vision_provider, vision_rate_limiter, ledger, log,
                        is_continuation, start_context):
     """The actual cognitive-action-perception loop, isolated for clarity."""
@@ -250,7 +251,7 @@ def _run_session_inner(p, browser, page, goal, provider, config,
     try:
         # ----- Orchestrator: route the task -----
         if not is_continuation:
-            orch = run_orchestrator(provider, goal, rate_limiter)
+            orch = await run_orchestrator(provider, goal, rate_limiter)
             route = orch.get("route", "browser")
             log(f"[ORCHESTRATOR] route={route} "
                 f"confidence={orch.get('confidence', '?')} "
@@ -269,12 +270,12 @@ def _run_session_inner(p, browser, page, goal, provider, config,
 
         if context is None:
             # First worker step: pick a starting URL
-            decision = run_worker_first_step(provider, goal, rate_limiter)
+            decision = await run_worker_first_step(provider, goal, rate_limiter)
             action_type = decision.get("action", "navigate")
             url = decision.get("url", "")
             log(f"[WORKER #1] {action_type} -> {url} "
                 f"({decision.get('reasoning', '')})")
-            ok, note = execute_action(
+            ok, note = await execute_action(
                 page, {"action": "navigate", "url": url}, log
             )
             last_action = {"action": "navigate", "url": url}
@@ -296,14 +297,14 @@ def _run_session_inner(p, browser, page, goal, provider, config,
             log(f"\n========== STEP {step}/{config.max_steps} ==========")
 
             # ----- Perception: extract page context + vision context -----
-            context = extract_page_context(page)
+            context = await extract_page_context(page)
             log(f"-- PERCEPTION: title={context['title']!r} url={context['url']}")
             
             # Build vision context if vision is enabled (for Worker's planning)
             if config.use_vision and vision_provider:
                 log("[VISION] Building vision context (screenshot + SoM)...")
                 try:
-                    vision_context = build_vision_context(page, goal, ledger.render_for_worker())
+                    vision_context = await build_vision_context(page, goal, ledger.render_for_worker())
                     context["annotated_screenshot_bytes"] = vision_context["annotated_screenshot_bytes"]
                     context["vision_elements"] = vision_context["elements"]
                     context["viewport_width"] = vision_context["viewport_width"]
@@ -334,42 +335,6 @@ def _run_session_inner(p, browser, page, goal, provider, config,
                     log(f"[VISION] Failed to build vision context: {e}")
                     config.use_vision = False
             
-            # Build vision context if vision is enabled
-            vision_context = {}
-            if config.use_vision and vision_provider:
-                log("[VISION] Building vision context (screenshot + SoM)...")
-                try:
-                    vision_context = build_vision_context(page, goal, ledger.render_for_worker())
-                    context["annotated_screenshot_bytes"] = vision_context["annotated_screenshot_bytes"]
-                    context["vision_elements"] = vision_context["elements"]
-                    context["viewport_width"] = vision_context["viewport_width"]
-                    context["viewport_height"] = vision_context["viewport_height"]
-                    log(f"[VISION] Found {len(vision_context['elements'])} interactive elements")
-                    
-                    # DEBUG: Log vision elements with bounding boxes
-                    log("[VISION DEBUG] Elements list:")
-                    for el in vision_context["elements"]:
-                        eid = el.get("id", "?")
-                        bbox = el.get("bbox", [0,0,0,0])
-                        x, y, w, h = bbox
-                        text = el.get("text", "")[:50]
-                        role = el.get("role", "")
-                        selector = el.get("selector", "")[:60]
-                        log(f"  [{eid}] {role} '{text}' @ ({x:.3f},{y:.3f},{w:.3f},{h:.3f}) sel={selector}")
-                    
-                    # DEBUG: Save annotated screenshot for visual inspection
-                    try:
-                        import tempfile
-                        debug_path = f"/tmp/vision_som_step_{step}.png"
-                        with open(debug_path, "wb") as f:
-                            f.write(vision_context["annotated_screenshot_bytes"])
-                        log(f"[VISION DEBUG] SoM screenshot saved to {debug_path}")
-                    except Exception as e:
-                        log(f"[VISION DEBUG] Failed to save screenshot: {e}")
-                except Exception as e:
-                    log(f"[VISION] Failed to build vision context: {e}")
-                    config.use_vision = False
-
             # ----- Planner (every N steps, or after Worker 'done') -----
             run_planner_now = (
                 step == 1
@@ -378,7 +343,7 @@ def _run_session_inner(p, browser, page, goal, provider, config,
             )
             next_steps: list[str] = []
             if run_planner_now:
-                plan = run_planner(provider, goal, ledger, context, last_action, last_result, rate_limiter)
+                plan = await run_planner(provider, goal, ledger, context, last_action, last_result, rate_limiter)
                 verdict = plan.get("verdict", "continue")
                 log(f"[PLANNER] verdict={verdict} "
                     f"reasoning={plan.get('reasoning', '')}")
@@ -410,8 +375,7 @@ def _run_session_inner(p, browser, page, goal, provider, config,
                 interactive_text = "\n".join(elements_for_worker) if elements_for_worker else "  (no interactive elements detected)"
                 
                 # Step 1: Worker decides action + target_description
-                from cognitive_layer import run_worker_vision_step
-                worker_decision = run_worker_vision_step(
+                worker_decision = await run_worker_vision_step(
                     provider, goal, ledger, context, next_steps, interactive_text, rate_limiter
                 )
                 
@@ -437,8 +401,7 @@ def _run_session_inner(p, browser, page, goal, provider, config,
                 elif action in ("click", "type"):
                     # Step 2: Vision grounds target_description to element_id
                     log("[VISION] Grounding worker intent to element...")
-                    from cognitive_layer import run_vision_grounding
-                    vision_decision = run_vision_grounding(
+                    vision_decision = await run_vision_grounding(
                         vision_provider, 
                         worker_intent=target_description,
                         goal=goal,
@@ -504,7 +467,7 @@ def _run_session_inner(p, browser, page, goal, provider, config,
                     decision = {"action": "scroll", "scroll_pixels": 500, "reasoning": "vision fallback"}
             else:
                 # Text-based worker (original)
-                decision = run_worker_next_step(provider, goal, ledger, context, next_steps, rate_limiter)
+                decision = await run_worker_next_step(provider, goal, ledger, context, next_steps, rate_limiter)
                 action = decision.get("action", "navigate")
                 log(f"[WORKER] {action} -- {decision.get('reasoning', '')}")
 
@@ -538,11 +501,11 @@ def _run_session_inner(p, browser, page, goal, provider, config,
             if action == "search_google":
                 query = decision.get("query", "")
                 log(f"[VERIFICATION] Searching Google for: {query}")
-                search_results = search_and_verify(page, query, log)
+                search_results = await search_and_verify(page, query, log)
                 ok = bool(search_results)
                 note = f"Search results: {search_results[:500]}..." if search_results else "No results found"
             else:
-                ok, note = execute_action(page, decision, log)
+                ok, note = await execute_action(page, decision, log)
 
             last_action = {
                 "action": action,
@@ -568,7 +531,7 @@ def _run_session_inner(p, browser, page, goal, provider, config,
 
             # ----- Not-found detection -----
             if action == "navigate":
-                text_now = extract_page_context(page).get("text", "")
+                text_now = (await extract_page_context(page)).get("text", "")
                 if _classify_search_intent(text_now):
                     ledger.mark_dead_end(
                         f"search query {decision.get('url','')[:80]} returned no results",
@@ -579,7 +542,7 @@ def _run_session_inner(p, browser, page, goal, provider, config,
                     log("[DEAD-END] Search returned no results — recorded.")
 
             # ----- Captcha auto-pivot -----
-            context_after = extract_page_context(page)
+            context_after = await extract_page_context(page)
             if is_captcha_page(context_after):
                 captcha_count += 1
                 log(f"[CAPTCHA] block #{captcha_count} — pivoting")
@@ -594,8 +557,8 @@ def _run_session_inner(p, browser, page, goal, provider, config,
                     final_answer = "Blocked by repeated CAPTCHA. Try a different site."
                     break
                 fb = FALLBACK_URLS[(captcha_count - 1) % len(FALLBACK_URLS)]
-                page.goto(fb, wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_timeout(2000)
+                await page.goto(fb, wait_until="domcontentloaded", timeout=15000)
+                await page.wait_for_timeout(2000)
 
         else:
             # Loop completed without break → ask user if they want to continue
@@ -611,6 +574,5 @@ def _run_session_inner(p, browser, page, goal, provider, config,
     except Exception as e:
         log(f"[engine error] {e}")
         raise
-        final_answer = f"Engine error: {e}"
 
     return status, final_answer, step_count, context

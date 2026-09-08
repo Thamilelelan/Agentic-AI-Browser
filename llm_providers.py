@@ -1,14 +1,15 @@
-"""LLM Provider Abstraction - supports Gemini, NVIDIA Nemotron, and NVIDIA Vision-Language Models"""
+"""LLM Provider Abstraction - supports Gemini, NVIDIA Nemotron, and NVIDIA Vision-Language Models (async)"""
 import os
 import json
 import re
 import base64
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
 from google import genai
 from google.genai import types
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 
 @dataclass
@@ -23,7 +24,7 @@ class LLMConfig:
 
 class LLMProvider(ABC):
     @abstractmethod
-    def generate_json(self, prompt: str, config: LLMConfig) -> dict:
+    async def generate_json(self, prompt: str, config: LLMConfig) -> dict:
         pass
 
 
@@ -32,9 +33,10 @@ class GeminiProvider(LLMProvider):
         self.client = genai.Client(api_key=api_key)
         self.model = model
 
-    def generate_json(self, prompt: str, config: LLMConfig) -> dict:
+    async def generate_json(self, prompt: str, config: LLMConfig) -> dict:
         try:
-            response = self.client.models.generate_content(
+            response = await asyncio.to_thread(
+                self.client.models.generate_content,
                 model=self.model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
@@ -62,7 +64,7 @@ class NvidiaProvider(LLMProvider):
     BASE_URL = "https://integrate.api.nvidia.com/v1"
     
     def __init__(self, api_key: str, model: str = DEFAULT_MODEL, base_url: Optional[str] = None):
-        self.client = OpenAI(
+        self.client = AsyncOpenAI(
             base_url=base_url or self.BASE_URL,
             api_key=api_key,
         )
@@ -70,12 +72,12 @@ class NvidiaProvider(LLMProvider):
         self._consecutive_failures = 0
         self._available = None
     
-    def is_available(self) -> bool:
+    async def is_available(self) -> bool:
         if self._available is not None:
             return self._available
         
         try:
-            self.client.chat.completions.create(
+            await self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": "test"}],
                 max_tokens=10,
@@ -94,7 +96,7 @@ class NvidiaProvider(LLMProvider):
             "reasoning_effort": "max" if config.reasoning else "low",
         }
     
-    def generate_json(self, prompt: str, config: LLMConfig) -> dict:
+    async def generate_json(self, prompt: str, config: LLMConfig) -> dict:
         """Generate JSON response using NVIDIA Build API (Kimi K3 etc.) with streaming and retry logic.
         
         Kimi K3 defaults: temperature=1.0, reasoning_effort=max
@@ -112,7 +114,7 @@ class NvidiaProvider(LLMProvider):
                 
                 print(f"[NVIDIA] Calling API with model={self.model}, prompt_len={len(prompt)}, temp={temperature}, top_p={top_p}, reasoning={config.reasoning} (attempt {attempt + 1}/{max_retries})")
                 
-                completion = self.client.chat.completions.create(
+                completion = await self.client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=temperature,
@@ -125,7 +127,7 @@ class NvidiaProvider(LLMProvider):
                 reasoning_content = ""
                 content = ""
                 
-                for chunk in completion:
+                async for chunk in completion:
                     if not chunk.choices:
                         continue
                     delta = chunk.choices[0].delta
@@ -161,14 +163,12 @@ class NvidiaProvider(LLMProvider):
                 if "429" in str(e) or "rate limit" in str(e).lower():
                     wait_time = (2 ** attempt) * 5
                     print(f"[NVIDIA] Rate limited, waiting {wait_time}s...")
-                    import time
-                    time.sleep(wait_time)
+                    await asyncio.sleep(wait_time)
                     continue
                 elif "500" in str(e) or "502" in str(e) or "503" in str(e) or "internal server error" in str(e).lower() or "service temporarily overloaded" in str(e).lower():
                     wait_time = (2 ** attempt) * 3
                     print(f"[NVIDIA] Server error, waiting {wait_time}s...")
-                    import time
-                    time.sleep(wait_time)
+                    await asyncio.sleep(wait_time)
                     continue
                 elif "401" in str(e) or "403" in str(e):
                     raise RuntimeError(f"NVIDIA API authentication failed: {error_msg}")
@@ -179,8 +179,7 @@ class NvidiaProvider(LLMProvider):
                 
                 if attempt == max_retries - 1:
                     raise RuntimeError(f"NVIDIA API failed after {max_retries} attempts: {error_msg}")
-                import time
-                time.sleep(base_delay * (attempt + 1))
+                await asyncio.sleep(base_delay * (attempt + 1))
         
         raise RuntimeError("Max retries exceeded")
 
@@ -197,18 +196,18 @@ class NvidiaVisionProvider(LLMProvider):
     BASE_URL = "https://integrate.api.nvidia.com/v1"
     
     def __init__(self, api_key: str, model: str = DEFAULT_MODEL, base_url: Optional[str] = None):
-        self.client = OpenAI(
+        self.client = AsyncOpenAI(
             base_url=base_url or self.BASE_URL,
             api_key=api_key,
         )
         self.model = model
         self._available = None
     
-    def is_available(self) -> bool:
+    async def is_available(self) -> bool:
         if self._available is not None:
             return self._available
         try:
-            self.client.chat.completions.create(
+            await self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": "test"}],
                 max_tokens=1,
@@ -226,7 +225,7 @@ class NvidiaVisionProvider(LLMProvider):
         with open(image_path, "rb") as f:
             return base64.b64encode(f.read()).decode("utf-8")
     
-    def generate_json(self, prompt: str, config: LLMConfig, image_path: Optional[str] = None) -> dict:
+    async def generate_json(self, prompt: str, config: LLMConfig, image_path: Optional[str] = None) -> dict:
         """Generate JSON response using NVIDIA VLM with optional image"""
         max_retries = 3
         base_delay = 2.0
@@ -248,7 +247,7 @@ class NvidiaVisionProvider(LLMProvider):
             try:
                 print(f"[NVIDIA VISION] Calling API with model={self.model}, prompt_len={len(prompt)}, image={'yes' if image_path else 'no'} (attempt {attempt + 1}/{max_retries})")
                 
-                completion = self.client.chat.completions.create(
+                completion = await self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
                     temperature=config.temperature,
@@ -258,7 +257,7 @@ class NvidiaVisionProvider(LLMProvider):
                 )
                 
                 content = ""
-                for chunk in completion:
+                async for chunk in completion:
                     if not chunk.choices:
                         continue
                     delta = chunk.choices[0].delta
@@ -285,22 +284,19 @@ class NvidiaVisionProvider(LLMProvider):
                 if "429" in str(e) or "rate limit" in str(e).lower():
                     wait_time = (2 ** attempt) * 5
                     print(f"[NVIDIA VISION] Rate limited, waiting {wait_time}s...")
-                    import time
-                    time.sleep(wait_time)
+                    await asyncio.sleep(wait_time)
                     continue
                 elif "500" in str(e) or "502" in str(e) or "503" in str(e) or "internal server error" in str(e).lower():
                     wait_time = (2 ** attempt) * 3
                     print(f"[NVIDIA VISION] Server error, waiting {wait_time}s...")
-                    import time
-                    time.sleep(wait_time)
+                    await asyncio.sleep(wait_time)
                     continue
                 elif "401" in str(e) or "403" in str(e):
                     raise RuntimeError(f"NVIDIA VLM API authentication failed: {error_msg}")
                 
                 if attempt == max_retries - 1:
                     raise RuntimeError(f"NVIDIA VLM API failed after {max_retries} attempts: {error_msg}")
-                import time
-                time.sleep(base_delay * (attempt + 1))
+                await asyncio.sleep(base_delay * (attempt + 1))
         
         raise RuntimeError("Max retries exceeded")
 
@@ -311,14 +307,14 @@ class OpenAIVisionProvider(LLMProvider):
     DEFAULT_MODEL = "gpt-4o"
     
     def __init__(self, api_key: str, model: str = DEFAULT_MODEL):
-        self.client = OpenAI(api_key=api_key)
+        self.client = AsyncOpenAI(api_key=api_key)
         self.model = model
     
     def _encode_image(self, image_path: str) -> str:
         with open(image_path, "rb") as f:
             return base64.b64encode(f.read()).decode("utf-8")
     
-    def generate_json(self, prompt: str, config: LLMConfig, image_path: Optional[str] = None) -> dict:
+    async def generate_json(self, prompt: str, config: LLMConfig, image_path: Optional[str] = None) -> dict:
         max_retries = 3
         base_delay = 2.0
         
@@ -338,7 +334,7 @@ class OpenAIVisionProvider(LLMProvider):
             try:
                 print(f"[OPENAI VISION] Calling API with model={self.model}, image={'yes' if image_path else 'no'} (attempt {attempt + 1}/{max_retries})")
                 
-                response = self.client.chat.completions.create(
+                response = await self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
                     temperature=config.temperature,
@@ -366,8 +362,7 @@ class OpenAIVisionProvider(LLMProvider):
                 print(f"[OPENAI VISION] Error (attempt {attempt + 1}/{3}): {error_msg}")
                 if attempt == max_retries - 1:
                     raise RuntimeError(f"OpenAI Vision API failed after {max_retries} attempts: {error_msg}")
-                import time
-                time.sleep(base_delay * (attempt + 1))
+                await asyncio.sleep(base_delay * (attempt + 1))
         
         raise RuntimeError("Max retries exceeded")
 
@@ -388,7 +383,7 @@ class GeminiVisionProvider(LLMProvider):
         with open(image_path, "rb") as f:
             return base64.b64encode(f.read()).decode("utf-8")
     
-    def generate_json(self, prompt: str, config: LLMConfig, image_path: Optional[str] = None) -> dict:
+    async def generate_json(self, prompt: str, config: LLMConfig, image_path: Optional[str] = None) -> dict:
         max_retries = 3
         base_delay = 2.0
         
@@ -406,7 +401,8 @@ class GeminiVisionProvider(LLMProvider):
                 else:
                     contents = prompt
                 
-                response = self.client.models.generate_content(
+                response = await asyncio.to_thread(
+                    self.client.models.generate_content,
                     model=self.model,
                     contents=contents,
                     config=self._types.GenerateContentConfig(
@@ -430,8 +426,7 @@ class GeminiVisionProvider(LLMProvider):
                 print(f"[GEMINI VISION] Error (attempt {attempt + 1}/{3}): {error_msg}")
                 if attempt == max_retries - 1:
                     raise RuntimeError(f"Gemini Vision API failed after {max_retries} attempts: {error_msg}")
-                import time
-                time.sleep(base_delay * (attempt + 1))
+                await asyncio.sleep(base_delay * (attempt + 1))
         
         raise RuntimeError("Max retries exceeded")
 
@@ -444,7 +439,7 @@ def create_llm_provider() -> LLMProvider:
         api_key = os.getenv("nvidia_api_key")
         if not api_key:
             raise ValueError("NVIDIA provider selected but nvidia_api_key not set in .env")
-        model = os.getenv("nvidia_model", "nvidia/nemotron-3-ultra-550b-a55b")
+        model = os.getenv("nvidia_model", "moonshotai/kimi-k3")
         return NvidiaProvider(api_key=api_key, model=model)
     
     elif provider_type == "gemini":
@@ -460,7 +455,7 @@ def create_llm_provider() -> LLMProvider:
 
 def create_vision_provider() -> LLMProvider:
     """Factory function - creates vision provider based on env config"""
-    vision_provider_type = os.getenv("vision_provider", "gemini").lower()
+    vision_provider_type = os.getenv("vision_provider", "nvidia").lower()
     
     if vision_provider_type == "openai":
         api_key = os.getenv("openai_api_key")
@@ -487,14 +482,7 @@ def create_vision_provider() -> LLMProvider:
         raise ValueError(f"Unknown vision_provider: {vision_provider_type}. Use 'openai', 'gemini', or 'nvidia'")
 
 
-def get_vision_rate_limiter() -> RateLimiter:
-    """Rate limiter for vision model - more conservative"""
-    return RateLimiter(max_requests=10, window_seconds=60)
-
-
 # Rate limiter (shared)
-import time
-
 class RateLimiter:
     def __init__(self, max_requests: int, window_seconds: int = 60, initial_delay: float = 1.0):
         self.max_requests = max_requests
@@ -503,25 +491,24 @@ class RateLimiter:
         self.initial_delay = initial_delay
         self._first_call = True
 
-    def wait_if_needed(self):
-        import time
+    async def wait_if_needed(self):
         if self._first_call:
             self._first_call = False
             if self.initial_delay > 0:
-                time.sleep(self.initial_delay)
+                await asyncio.sleep(self.initial_delay)
         
-        now = time.time()
+        now = asyncio.get_event_loop().time()
         self.timestamps = [t for t in self.timestamps if now - t < self.window_seconds]
         
         if len(self.timestamps) >= self.max_requests:
             sleep_for = self.window_seconds - (now - self.timestamps[0])
             if sleep_for > 0:
                 print(f"[RATE LIMIT] Hit {self.max_requests} req/{self.window_seconds}s cap. Sleeping {sleep_for:.1f}s...")
-                time.sleep(sleep_for)
-                now = time.time()
+                await asyncio.sleep(sleep_for)
+                now = asyncio.get_event_loop().time()
                 self.timestamps = [t for t in self.timestamps if now - t < self.window_seconds]
         
-        self.timestamps.append(time.time())
+        self.timestamps.append(asyncio.get_event_loop().time())
 
 
 # Global rate limiter (configured per provider)

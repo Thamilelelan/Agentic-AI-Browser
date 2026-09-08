@@ -1,4 +1,4 @@
-"""Three-role cognitive layer (per RunAgent SuperBrowser §4.1).
+"""Three-role cognitive layer (per RunAgent SuperBrowser §4.1) - async version.
 
 - Orchestrator: classifies the task, decides whether to open a browser or
   answer from a lightweight fetch. For now we always route to the browser.
@@ -7,9 +7,11 @@
   scroll / press / mouseclick).
 """
 import json
+import tempfile
+import os
 from dataclasses import dataclass
 
-from llm_providers import LLMProvider, LLMConfig, create_llm_provider, get_rate_limiter
+from llm_providers import LLMProvider, LLMConfig, get_rate_limiter
 from memory import Ledger
 
 
@@ -28,11 +30,11 @@ Task: "{goal}"
 """
 
 
-def run_orchestrator(provider: LLMProvider, goal: str, rate_limiter) -> dict:
+async def run_orchestrator(provider: LLMProvider, goal: str, rate_limiter) -> dict:
     prompt = ORCHESTRATOR_PROMPT.format(goal=goal)
     config = LLMConfig(model="", temperature=0.1, max_tokens=500)
-    rate_limiter.wait_if_needed()
-    return provider.generate_json(prompt, config)
+    await rate_limiter.wait_if_needed()
+    return await provider.generate_json(prompt, config)
 
 
 # ----- Planner -------------------------------------------------------------
@@ -80,10 +82,9 @@ CRITICAL RULES:
 """
 
 
-def run_planner(provider: LLMProvider, goal: str, ledger: "Ledger",
+async def run_planner(provider: LLMProvider, goal: str, ledger: "Ledger",
                 page_context: dict, last_action: dict, last_result: dict,
                 rate_limiter) -> dict:
-    import json
     prompt = PLANNER_PROMPT.format(
         goal=goal,
         ledger=ledger.render_for_planner(),
@@ -94,8 +95,8 @@ def run_planner(provider: LLMProvider, goal: str, ledger: "Ledger",
         last_result=json.dumps(last_result),
     )
     config = LLMConfig(model="", temperature=0.3, max_tokens=1000)
-    rate_limiter.wait_if_needed()
-    return provider.generate_json(prompt, config)
+    await rate_limiter.wait_if_needed()
+    return await provider.generate_json(prompt, config)
 
 
 # ----- Worker --------------------------------------------------------------
@@ -113,11 +114,11 @@ DECISION RULES:
 - NEVER use Google — it blocks automated browsers.
 
 Respond ONLY with JSON:
-{
+{{
   "action": "navigate",
   "url": "https://...",
   "reasoning": "short explanation"
-}
+}}
 """
 
 
@@ -147,7 +148,7 @@ PLANNER'S GUIDANCE: {next_steps}
 Respond ONLY with a valid JSON object. CRITICAL: copy the "selector" VERBATIM
 from the interactive list above — do NOT invent selectors.
 
-{
+{{
   "action": "navigate" | "click" | "type" | "scroll" | "press" | "mouseclick" | "done",
   "url": "URL (if navigate)",
   "selector": "selector from list (if click or type)",
@@ -158,7 +159,7 @@ from the interactive list above — do NOT invent selectors.
   "x": 0, "y": 0,
   "answer": "final answer (if action=done)",
   "reasoning": "short explanation"
-}
+}}
 
 IMPORTANT:
 - If dead-ends show repeated failures for the same query, call action="done"
@@ -171,6 +172,11 @@ IMPORTANT:
   report exactly: "Search results show iPhone 17 Pro at ₹X. iPhone 16 Pro does not
   appear in the visible results." Do NOT say the product "doesn't exist" — only
   report what the page actually shows.
+- FOR CLICKING: Use the EXACT "selector" value from the interactive elements list above.
+  Do NOT invent selectors like "button:has-text('...')" — they will fail.
+  The "selector" field in the interactive list is a valid CSS selector that will work.
+- For typing: use the exact "input_selector" from the interactive list.
+- If the interactive list is empty or the element you need isn't listed, use "scroll" or "search_google" instead of guessing.
 - For YouTube videos: selectors look like `a#video-title-link`,
   `a[href*="watch?v=..."]`, or inside `ytd-rich-grid-renderer`/`ytd-rich-item-renderer`.
   **On channel pages (@user), latest videos are usually visible on the home page —
@@ -180,7 +186,7 @@ IMPORTANT:
 """
 
 
-def run_worker_first_step(provider, goal: str, rate_limiter) -> dict:
+async def run_worker_first_step(provider, goal: str, rate_limiter) -> dict:
     prompt = """You are the WORKER (operational layer) of an autonomous web agent.
 The user wants: "{goal}"
 
@@ -202,11 +208,11 @@ Respond ONLY with JSON:
   "reasoning": "short explanation"
 }}""".format(goal=goal)
     config = LLMConfig(model="", temperature=0.3, max_tokens=500)
-    rate_limiter.wait_if_needed()
-    return provider.generate_json(prompt, config)
+    await rate_limiter.wait_if_needed()
+    return await provider.generate_json(prompt, config)
 
 
-def run_worker_next_step(provider, goal: str, ledger, page_context: dict, next_steps: list[str], rate_limiter) -> dict:
+async def run_worker_next_step(provider, goal: str, ledger, page_context: dict, next_steps: list[str], rate_limiter) -> dict:
     interactive = page_context.get("interactive", "[]")
     if len(interactive) > 4000:
         interactive = interactive[:4000] + "\n... (truncated)"
@@ -236,7 +242,6 @@ PLANNER'S GUIDANCE: {next_steps}
 Respond ONLY with a valid JSON object. CRITICAL: copy the "selector" VERBATIM
 from the interactive list above — do NOT invent selectors.
 
-{{
 {{
   "action": "navigate" | "click" | "type" | "scroll" | "press" | "mouseclick" | "search_google" | "done",
   "url": "URL (if navigate)",
@@ -286,11 +291,11 @@ IMPORTANT:
         next_steps=" | ".join(next_steps) if next_steps else "(no guidance)",
     )
     config = LLMConfig(model="", temperature=0.3, max_tokens=1000)
-    rate_limiter.wait_if_needed()
-    return provider.generate_json(prompt, config)
+    await rate_limiter.wait_if_needed()
+    return await provider.generate_json(prompt, config)
 
 
-def run_worker_vision_step(provider, goal: str, ledger, page_context: dict, next_steps: list[str], interactive_text: str, rate_limiter) -> dict:
+async def run_worker_vision_step(provider, goal: str, ledger, page_context: dict, next_steps: list[str], interactive_text: str, rate_limiter) -> dict:
     """Worker with vision context - plans action + target_description for vision grounding."""
     ledger_text = ledger.render_for_worker()
     
@@ -304,8 +309,8 @@ def run_worker_vision_step(provider, goal: str, ledger, page_context: dict, next
         next_steps=" | ".join(next_steps) if next_steps else "(no guidance)",
     )
     config = LLMConfig(model="", temperature=0.3, max_tokens=1000)
-    rate_limiter.wait_if_needed()
-    return provider.generate_json(prompt, config)
+    await rate_limiter.wait_if_needed()
+    return await provider.generate_json(prompt, config)
 
 
 # ----- Vision Grounding (SeeAct style) ---------------------------------------
@@ -402,7 +407,7 @@ CRITICAL RULES:
 """
 
 
-def run_vision_grounding(
+async def run_vision_grounding(
     vision_provider,
     worker_intent: str,
     goal: str,
@@ -449,9 +454,6 @@ def run_vision_grounding(
         max_tokens=1000
     )
     
-    import tempfile
-    import os
-    
     annotated_screenshot = page_context.get("annotated_screenshot_bytes")
     
     if annotated_screenshot:
@@ -460,16 +462,16 @@ def run_vision_grounding(
             temp_path = f.name
         
         try:
-            rate_limiter.wait_if_needed()
-            response = vision_provider.generate_json(prompt, config, image_path=temp_path)
+            await rate_limiter.wait_if_needed()
+            response = await vision_provider.generate_json(prompt, config, image_path=temp_path)
         finally:
             try:
                 os.unlink(temp_path)
             except Exception:
                 pass
     else:
-        rate_limiter.wait_if_needed()
-        response = vision_provider.generate_json(prompt, config)
+        await rate_limiter.wait_if_needed()
+        response = await vision_provider.generate_json(prompt, config)
     
     return parse_vision_response(response)
 
