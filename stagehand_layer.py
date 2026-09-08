@@ -26,14 +26,13 @@ class StagehandConfig:
     base_url: str = "https://integrate.api.nvidia.com/v1"
     timeout: int = 30000  # ms
     enable_cache: bool = False
-    browser: str = "chromium"  # "chromium" or "cdp" - Stagehand doesn't support CDP
 
 
 class StagehandLayer:
     """Wrapper around Stagehand SDK for reliable browser actions.
     
     Uses natural language actions via Stagehand's `act()` method
-    instead of fragile CSS selectors.
+    instead of fragile CSS selectors. Passes our Playwright page to Stagehand's act().
     """
     
     def __init__(
@@ -49,29 +48,53 @@ class StagehandLayer:
         self._initialized = False
         
     async def initialize(self) -> bool:
-        """Initialize Stagehand with our Kimi K3 model via NVIDIA Build."""
+        """Initialize Stagehand with supported model via NVIDIA Build (OpenAI-compatible)."""
         if not STAGEHAND_AVAILABLE:
             self.log("[STAGEHAND] Stagehand not available")
             return False
             
         try:
-            # Stagehand's Python SDK requires the browser to be created by 
-            # local_browser or browserbase. CDP-attached browsers are not supported.
             # Check if we're using a CDP-attached browser
-            if self.config.browser == "cdp" or "cdp" in str(self.page.context.browser):
+            browser_type = "cdp" if "cdp" in str(self.page.context.browser).lower() else "chromium"
+            if browser_type == "cdp":
                 self.log("[STAGEHAND] CDP-attached browser detected, Stagehand requires local_browser/browserbase. Falling back to vision pipeline.")
                 self._initialized = False
                 return False
             
-            from stagehand import Stagehand
+# Create Stagehand instance using local_browser
+            from stagehand import local_browser
+            chromium_path = "/home/cosmic/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome"
+            import os
+            if not os.path.exists(chromium_path):
+                chromium_path = "/home/cosmic/.cache/ms-playwright/chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell"
             
-            self.stagehand = await Stagehand.create(
-                browser=self.page.context.browser,
-                model="moonshotai/kimi-k3",
+            self.log(f"Launching browser with Stagehand's local_browser (executable: {chromium_path})...")
+            self._stagehand_browser = await local_browser.launch(
+                headless=self.page.context.browser._impl_obj._headless if hasattr(self.page.context.browser._impl_obj, '_headless') else True,
+                executable_path=chromium_path,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                ],
             )
             
+            self.stagehand = await Stagehand.create(
+                browser=self._stagehand_browser,
+                api_key=self.config.api_key,
+                api_url="https://integrate.api.nvidia.com",
+                model="openai/gpt-4o",
+            )
+            
+            # Get the page from Stagehand's browser context
+            pages = await self.stagehand.browser.context.pages()
+            if pages:
+                self.page = pages[0]
+            else:
+                # Fallback: create a new page
+                self.page = await self.stagehand.browser.context.new_page()
+            
             self._initialized = True
-            self.log("[STAGEHAND] Initialized successfully")
+            self.log("[STAGEHAND] Initialized successfully (using external page)")
             return True
             
         except Exception as e:
@@ -80,7 +103,7 @@ class StagehandLayer:
             return False
     
     async def act(self, instruction: str, log: Optional[Callable[[str], None]] = None) -> dict:
-        """Execute a natural language action via Stagehand.
+        """Execute a natural language action via Stagehand using our Playwright page.
         
         Args:
             instruction: Natural language action (e.g., "click the latest video")
@@ -96,10 +119,14 @@ class StagehandLayer:
         
         try:
             self.log(f"[STAGEHAND] act: {instruction}")
-            result = await self.stagehand.act(instruction)
+            result = await self.stagehand.act(
+                instruction,
+                page=self.page,
+                model=self._build_model_config(),
+                timeout=self.config.timeout,
+            )
             
             # Stagehand returns ActResult with data and metadata
-            # result.data contains success, message, action_description, actions
             if hasattr(result, 'data'):
                 action_data = result.data
                 success = getattr(action_data, 'success', True)
@@ -123,16 +150,32 @@ class StagehandLayer:
             if "method not supported" in error_msg.lower():
                 # Try to use observe to get valid actions
                 try:
-                    observe_result = await self.stagehand.observe(instruction)
+                    observe_result = await self.stagehand.observe(
+                        instruction,
+                        page=self.page,
+                        model=self._build_model_config(),
+                    )
                     actions = observe_result.data if hasattr(observe_result, 'data') else []
                     if actions:
                         # Retry with the observed action
-                        retry_result = await self.stagehand.act(actions[0])
+                        retry_result = await self.stagehand.act(
+                            actions[0],
+                            page=self.page,
+                            model=self._build_model_config(),
+                        )
                         return {"success": True, "retry": True, "result": str(retry_result)}
                 except Exception:
                     pass
             
             return {"success": False, "error": error_msg, "instruction": instruction}
+    
+    def _build_model_config(self):
+        """Build model configuration for Stagehand."""
+        from stagehand.client_models import ModelConfig
+        return ModelConfig(
+            model_name="openai/gpt-4o",
+            api_key=self.config.api_key,
+        )
     
     async def observe(self, instruction: str) -> list:
         """Observe available actions for an instruction without executing."""
@@ -140,7 +183,11 @@ class StagehandLayer:
             return []
             
         try:
-            result = await self.stagehand.observe(instruction)
+            result = await self.stagehand.observe(
+                instruction,
+                page=self.page,
+                model=self._build_model_config(),
+            )
             return result.data if hasattr(result, 'data') else []
         except Exception as e:
             self.log(f"[STAGEHAND] observe failed: {e}")
@@ -152,7 +199,12 @@ class StagehandLayer:
             return None
             
         try:
-            result = await self.stagehand.extract(instruction, schema)
+            result = await self.stagehand.extract(
+                instruction,
+                schema,
+                page=self.page,
+                model=self._build_model_config(),
+            )
             return result.data if hasattr(result, 'data') else None
         except Exception as e:
             self.log(f"[STAGEHAND] extract failed: {e}")
@@ -165,69 +217,6 @@ class StagehandLayer:
                 await self.stagehand.close()
             except Exception:
                 pass
-
-
-# Alternative: Custom Stagehand-like wrapper using our Kimi K3 directly
-# if Stagehand SDK doesn't support custom LLM callbacks
-
-class CustomStagehandWrapper:
-    """Custom Stagehand-like wrapper using our Kimi K3 directly.
-    
-    This is a fallback if Stagehand SDK doesn't support custom LLM callbacks.
-    """
-    
-    def __init__(
-        self,
-        page,
-        provider,  # Our async LLMProvider (Kimi K3)
-        config: StagehandConfig,
-        log: Callable[[str], None] = print,
-    ):
-        self.page = page
-        self.provider = provider
-        self.config = config
-        self.log = log
-    
-    async def act(self, instruction: str, log: Optional[Callable[[str], None]] = None) -> dict:
-        """Execute action using our Kimi K3 via natural language."""
-        log_fn = log or self.log
-        
-        try:
-            # Build prompt for Kimi K3 to determine action
-            prompt = f"""You are a browser automation agent. Execute this instruction:
-
-{instruction}
-
-Current page: {self.page.url}
-Current title: {await self.page.title()}
-
-Return JSON with the action to perform:
-{{
-  "action": "click" | "type" | "scroll" | "navigate" | "wait",
-  "selector": "CSS selector if click/type",
-  "text": "text to type if type action",
-  "url": "URL if navigate",
-  "reasoning": "why this action"
-}}
-
-Be specific. Use CSS selectors from the page."""
-            
-            from llm_providers import LLMConfig
-            config = LLMConfig(model="", temperature=0.3, max_tokens=500)
-            
-            # We'd need to get the page context first
-            # This is a simplified version - the actual implementation
-            # would need to get page context like our action_layer
-            
-            response = await self.provider.generate_json(prompt, config)
-            
-            # Parse and execute
-            # This is complex - better to use Stagehand SDK directly
-            
-            return {"success": False, "error": "Not fully implemented"}
-            
-        except Exception as e:
-            return {"success": False, "error": str(e)}
 
 
 async def create_stagehand_layer(

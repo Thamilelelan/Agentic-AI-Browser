@@ -182,7 +182,6 @@ async def run_session(
                 base_url="https://integrate.api.nvidia.com/v1",
                 timeout=30000,
                 enable_cache=False,
-                browser=config.browser,
             )
             stagehand_layer = StagehandLayer(page, stagehand_config, log)
             initialized = await stagehand_layer.initialize()
