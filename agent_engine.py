@@ -16,6 +16,10 @@ Vision integration (SeeAct style, §4.3, §6.1):
     - Capture screenshot + Set-of-Marks (SoM) annotation
     - Vision-Language Model grounds action to element ID
     - Execute coordinate-based click via vision_click
+
+Stagehand integration (§4.3, §6.1):
+    - Use Stagehand's act() for reliable natural language actions
+    - Fallback to vision pipeline if Stagehand unavailable
 """
 import os
 import tempfile
@@ -43,11 +47,7 @@ from cognitive_layer import (
 )
 from llm_providers import LLMProvider, LLMConfig, create_llm_provider, get_rate_limiter, create_vision_provider
 from memory import Ledger, StepOutcome
-
-
-# Tunables
-MAX_STEPS = 8
-PLANNER_INTERVAL = 3  # Run planner every N worker steps
+from stagehand_layer import StagehandLayer, StagehandConfig
 FAILED_CLICK_THRESHOLD = 2
 FALLBACK_URLS = [
     "https://duckduckgo.com/",
@@ -173,6 +173,26 @@ async def run_session(
             )
             page = await create_stealth_page(browser, headless=config.headless)
 
+        # Initialize Stagehand layer for reliable browser actions
+        stagehand_layer = None
+        if STAGEHAND_AVAILABLE:
+            stagehand_config = StagehandConfig(
+                model_name="moonshotai/kimi-k3",
+                api_key=os.getenv("nvidia_api_key", ""),
+                base_url="https://integrate.api.nvidia.com/v1",
+                timeout=30000,
+                enable_cache=False,
+            )
+            stagehand_layer = StagehandLayer(page, stagehand_config, log)
+            initialized = await stagehand_layer.initialize()
+            if not initialized:
+                log("[STAGEHAND] Initialization failed, falling back to native actions")
+                stagehand_layer = None
+            else:
+                log("[STAGEHAND] Initialized successfully")
+        else:
+            stagehand_layer = None
+
         provider_used = config.provider_type
         provider_fallback = False
         
@@ -180,6 +200,7 @@ async def run_session(
             status, final_answer, step_count, context = await _run_session_inner(
                 p, browser, page, goal, provider, config, rate_limiter,
                 vision_provider, vision_rate_limiter, ledger, log, is_continuation, start_context,
+                stagehand_layer,
             )
         except Exception as e:
             # Check if we should fallback from NVIDIA to Gemini
@@ -197,6 +218,7 @@ async def run_session(
                 status, final_answer, step_count, context = await _run_session_inner(
                     p, browser, page, goal, provider, config, rate_limiter,
                     vision_provider, vision_rate_limiter, ledger, log, is_continuation, start_context,
+                    stagehand_layer,
                 )
             else:
                 raise
@@ -213,6 +235,7 @@ async def run_session(
                 status, final_answer, step_count, context = await _run_session_inner(
                     p, browser, page, goal, provider, config, rate_limiter,
                     vision_provider, vision_rate_limiter, ledger, log, is_continuation, start_context,
+                    stagehand_layer,
                 )
             else:
                 raise
@@ -241,7 +264,7 @@ async def run_session(
 
 async def _run_session_inner(p, browser, page, goal, provider, config,
                        rate_limiter, vision_provider, vision_rate_limiter, ledger, log,
-                       is_continuation, start_context):
+                       is_continuation, start_context, stagehand_layer=None):
     """The actual cognitive-action-perception loop, isolated for clarity."""
     status = "exhausted"
     final_answer = ""
@@ -399,6 +422,131 @@ async def _run_session_inner(p, browser, page, goal, provider, config,
                 elif action == "scroll":
                     decision = {"action": "scroll", "scroll_pixels": 500, "reasoning": reasoning}
                 elif action in ("click", "type"):
+                    # Use Stagehand for reliable actions when available
+                    if stagehand_layer:
+                        log(f"[STAGEHAND] Executing {action}: {target_description}")
+                        stagehand_result = await stagehand_layer.act(target_description, log=log)
+                        if stagehand_result.get("success"):
+                            # Stagehand succeeded, create decision to mark as done
+                            decision = {
+                                "action": action,
+                                "stagehand_success": True,
+                                "stagehand_result": stagehand_result,
+                                "reasoning": reasoning
+                            }
+                            # Skip vision grounding, Stagehand handled it
+                        else:
+                            log(f"[STAGEHAND] Failed: {stagehand_result.get('error')}, falling back to vision")
+                            # Fall back to vision grounding
+                            vision_decision = await run_vision_grounding(
+                                vision_provider, 
+                                worker_intent=target_description,
+                                goal=goal,
+                                ledger=ledger,
+                                page_context=context,
+                                elements=context["vision_elements"],
+                                rate_limiter=vision_rate_limiter
+                            )
+                            element_id = vision_decision.get("element_id", -1)
+                            confidence = vision_decision.get("confidence", 0.0)
+                            v_reasoning = vision_decision.get("reasoning", "")
+                            
+                            log(f"[VISION GROUNDING] element_id={element_id} confidence={confidence:.2f} reasoning={v_reasoning}")
+                            
+                            if element_id >= 0 and element_id < len(context["vision_elements"]) and confidence > 0.3:
+                                target = context["vision_elements"][element_id]
+                                if action == "click":
+                                    decision = {
+                                        "action": "vision_click",
+                                        "element_id": element_id,
+                                        "elements": context["vision_elements"],
+                                        "viewport_width": context.get("viewport_width", 1366),
+                                        "viewport_height": context.get("viewport_height", 768),
+                                        "reasoning": reasoning + " | " + v_reasoning
+                                    }
+                                elif action == "type":
+                                    decision = {
+                                        "action": "vision_type",
+                                        "element_id": element_id,
+                                        "elements": context["vision_elements"],
+                                        "viewport_width": context.get("viewport_width", 1366),
+                                        "viewport_height": context.get("viewport_height", 768),
+                                        "text": v_text,
+                                        "press_key": press_key,
+                                        "reasoning": reasoning + " | " + v_reasoning
+                                    }
+                                else:
+                                    action = "scroll"
+                                    decision = {"action": "scroll", "scroll_pixels": 500, "reasoning": "vision fallback"}
+                            else:
+                                log(f"[VISION] Low confidence ({confidence:.2f}) or no match - falling back to scroll")
+                                action = "scroll"
+                                decision = {"action": "scroll", "scroll_pixels": 500, "reasoning": "vision: no confident match"}
+                            # No Stagehand, use vision pipeline
+                        # Step 2: Vision grounds target_description to element_id
+                        log("[VISION] Grounding worker intent to element...")
+                        vision_decision = await run_vision_grounding(
+                            vision_provider, 
+                            worker_intent=target_description,
+                            goal=goal,
+                            ledger=ledger,
+                            page_context=context,
+                            elements=context["vision_elements"],
+                            rate_limiter=vision_rate_limiter
+                        )
+                        
+                        element_id = vision_decision.get("element_id", -1)
+                        confidence = vision_decision.get("confidence", 0.0)
+                        v_reasoning = vision_decision.get("reasoning", "")
+                        
+                        log(f"[VISION GROUNDING] element_id={element_id} confidence={confidence:.2f} reasoning={v_reasoning}")
+                        
+                        # DEBUG: Show target element details
+                        if element_id >= 0 and element_id < len(context["vision_elements"]):
+                            target = context["vision_elements"][element_id]
+                            log(f"[VISION DEBUG] Target: id={element_id}, selector={target.get('selector','')[:60]}, text='{target.get('text','')[:50]}', role={target.get('role','')}, bbox={target.get('bbox')}")
+                        
+                        # Vision loop detection
+                        vision_action_key = (element_id, action, v_text)
+                        recent_vision_actions.append(vision_action_key)
+                        if len(recent_vision_actions) > MAX_VISION_REPEATS:
+                            recent_vision_actions.pop(0)
+                        
+                        if recent_vision_actions.count(vision_action_key) >= MAX_VISION_REPEATS:
+                            log(f"[VISION LOOP DETECTED] Same action repeated {MAX_VISION_REPEATS}x")
+                            action = "scroll"
+                            decision = {"action": "scroll", "scroll_pixels": 800, "reasoning": "vision loop break"}
+                            recent_vision_actions.clear()
+                        elif element_id >= 0 and element_id < len(context["vision_elements"]) and confidence > 0.3:
+                            target = context["vision_elements"][element_id]
+                            if action == "click":
+                                decision = {
+                                    "action": "vision_click",
+                                    "element_id": element_id,
+                                    "elements": context["vision_elements"],
+                                    "viewport_width": context.get("viewport_width", 1366),
+                                    "viewport_height": context.get("viewport_height", 768),
+                                    "reasoning": reasoning + " | " + v_reasoning
+                                }
+                            elif action == "type":
+                                decision = {
+                                    "action": "vision_type",
+                                    "element_id": element_id,
+                                    "elements": context["vision_elements"],
+                                    "viewport_width": context.get("viewport_width", 1366),
+                                    "viewport_height": context.get("viewport_height", 768),
+                                    "text": v_text,
+                                    "press_key": press_key,
+                                    "reasoning": reasoning + " | " + v_reasoning
+                                }
+                            else:
+                                action = "scroll"
+                                decision = {"action": "scroll", "scroll_pixels": 500, "reasoning": "vision fallback"}
+                        else:
+                            log(f"[VISION] Low confidence ({confidence:.2f}) or no match - falling back to scroll")
+                            action = "scroll"
+                            decision = {"action": "scroll", "scroll_pixels": 500, "reasoning": "vision: no confident match"}
+                                # No Stagehand, use vision pipeline
                     # Step 2: Vision grounds target_description to element_id
                     log("[VISION] Grounding worker intent to element...")
                     vision_decision = await run_vision_grounding(
