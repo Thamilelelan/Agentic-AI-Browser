@@ -26,6 +26,7 @@ class StagehandConfig:
     base_url: str = "https://integrate.api.nvidia.com/v1"
     timeout: int = 30000  # ms
     enable_cache: bool = False
+    browser: str = "chromium"  # "chromium" or "cdp" - Stagehand doesn't support CDP
 
 
 class StagehandLayer:
